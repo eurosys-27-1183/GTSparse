@@ -7,6 +7,15 @@
 *.o
 *.obj
 
+dataset
+dataset/
+logs/
+
+build/
+dist/
+**/__pycache__/
+*.egg-info/
+
 # Precompiled Headers
 *.gch
 *.pch
