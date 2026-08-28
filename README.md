@@ -1,5 +1,7 @@
 # GTSparse: A Geomtric-Template-Driven Sparse Convolution Runtime on GPUs
 
+## Artifact Evaluation
+
 ## Dataset Preparation
 
 You would need to download KITTI, NuScenes, and SemanticKITTI datasets. Links:
