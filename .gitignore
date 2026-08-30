@@ -7,9 +7,16 @@
 *.o
 *.obj
 
+# Local datasets, generated results, and private reference context.
 dataset
 dataset/
 logs/
+paper
+paper/
+ActiMM/
+AGENTS.md
+.venv/
+.cuda/
 
 build/
 dist/

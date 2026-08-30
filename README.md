@@ -29,28 +29,24 @@ dataset
 ```
 ## Installation
 
-Requires CUDA Toolkit 12.1 with PyTorch 2.1.0 or above.
+The artifact uses Python 3.10, PyTorch 2.1.2, and CUDA Toolkit 12.1. Clone the baseline submodules before installation:
 
-### GTSparse
 ```bash
-BUILD_MODE=production python3 setup.py develop --user
+git submodule update --init --recursive
+bash scripts/install.sh
+source scripts/activate.sh
 ```
 
-### Other Backends
+The installer creates `.venv`, installs the Ubuntu build dependencies, installs PyTorch cu121, and builds cumm, SpConv, TorchSparse++, MinkowskiEngine, and GTSparse from source. The first SpConv import compiles its generated CUDA sources and can take several minutes. The installer uses `/usr/local/cuda-12.1` when available. If CUDA Toolkit 12.1 is not installed, it installs the toolkit without a driver under `.cuda/cuda-12.1`.
 
-You would need to install the baseline backends manually. Links:
- - [SpConv v2](https://github.com/traveller59/spconv)
- - [TorchSparse++](https://github.com/mit-han-lab/torchsparse)
- - [Minkowski Engine](https://github.com/NVIDIA/MinkowskiEngine)
+Run the activation script before building or evaluating in a new shell:
 
-Note that the official Minkowski Engine does not support CUDA 12 and above. We used a third-party updated version [MinkowskiEngineCuda13](https://github.com/AzharSindhi/MinkowskiEngineCuda13)
+```bash
+source scripts/activate.sh
+python scripts/smoke_test.py
+```
 
 ## Evaluation
-
-Install dependencies:
-```bash
-pip install -r requirements.txt
-```
 
 Run evaluation:
 ```bash
