@@ -36,6 +36,13 @@ class Kernel9Runtime:
     coord_hashmap: torch.Tensor
 
 
+def kernel9_conv(features, weight, runtime):
+    fn = _C.gtsparse_kernel9_fp16_forward if features.dtype == torch.float16 else _C.gtsparse_kernel9_fp32_forward
+    return fn(features, weight, runtime.out_rows, runtime.input_rows_w1, runtime.input_rows_w4,
+              runtime.input_rows_w7, runtime.input_rows_w9, runtime.template_ids,
+              runtime.input_row_offsets, runtime.out_coords.size(0))
+
+
 class GeometricTemplateKernel9Conv3d(nn.Module):
     def __init__(
         self,
@@ -126,19 +133,7 @@ class GeometricTemplateKernel9Conv3d(nn.Module):
 
     def forward(self, x: GTSparseSparseConvTensor) -> GTSparseSparseConvTensor:
         runtime, out_spatial = self.build_runtime(x)
-        fn = _C.gtsparse_kernel9_fp16_forward if x.features.dtype == torch.float16 else _C.gtsparse_kernel9_fp32_forward
-        out_features = fn(
-            x.features,
-            self._runtime_weight(),
-            runtime.out_rows,
-            runtime.input_rows_w1,
-            runtime.input_rows_w4,
-            runtime.input_rows_w7,
-            runtime.input_rows_w9,
-            runtime.template_ids,
-            runtime.input_row_offsets,
-            runtime.out_coords.size(0),
-        )
+        out_features = kernel9_conv(x.features, self._runtime_weight(), runtime)
         if self.bias is not None:
             out_features = out_features + self.bias.view(1, -1)
         return x.replace_sparse(

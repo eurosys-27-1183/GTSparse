@@ -7,6 +7,9 @@ from tqdm.auto import tqdm
 
 from experiments.workloads import WORKLOADS, build_workload, move_batch, sparse_forward
 import gtsparse.sparse3d.geometric_template.ops as gt_ops
+import gtsparse.sparse3d.geometric_template.kernel3 as kernel3
+import gtsparse.sparse3d.geometric_template.kernel8 as kernel8
+import gtsparse.sparse3d.geometric_template.kernel9 as kernel9
 
 
 builder_events = []
@@ -15,6 +18,13 @@ original_build_subm = gt_ops.build_subm_runtime_from_coords
 original_build_full = gt_ops.build_full_runtime_from_coords
 original_build_reverse = gt_ops.build_reverse_runtime_from_full_runtime
 original_conv = gt_ops._conv
+original_kernel3_build = kernel3.GeometricTemplateKernel3Conv3d.build_runtime
+original_kernel3_conv = kernel3.kernel3_conv
+original_kernel9_build = kernel9.GeometricTemplateKernel9Conv3d.build_runtime
+original_kernel9_conv = kernel9.kernel9_conv
+original_kernel8_build = kernel8.GeometricTemplateKernel8Conv3d.build_runtime
+original_kernel8_reverse_build = kernel8.Kernel8ReverseSpec.build
+original_kernel8_conv = kernel8._conv
 
 
 def _timed_call(events, fn, *args, **kwargs):
@@ -43,11 +53,46 @@ def timed_conv(*args, **kwargs):
     return _timed_call(kernel_events, original_conv, *args, **kwargs)
 
 
+def timed_kernel3_build(self, *args, **kwargs):
+    return _timed_call(builder_events, original_kernel3_build, self, *args, **kwargs)
+
+
+def timed_kernel9_build(self, *args, **kwargs):
+    return _timed_call(builder_events, original_kernel9_build, self, *args, **kwargs)
+
+
+def timed_kernel8_build(self, *args, **kwargs):
+    return _timed_call(builder_events, original_kernel8_build, self, *args, **kwargs)
+
+
+def timed_kernel8_reverse_build(self, *args, **kwargs):
+    return _timed_call(builder_events, original_kernel8_reverse_build, self, *args, **kwargs)
+
+
+def timed_kernel3_conv(*args, **kwargs):
+    return _timed_call(kernel_events, original_kernel3_conv, *args, **kwargs)
+
+
+def timed_kernel9_conv(*args, **kwargs):
+    return _timed_call(kernel_events, original_kernel9_conv, *args, **kwargs)
+
+
+def timed_kernel8_conv(*args, **kwargs):
+    return _timed_call(kernel_events, original_kernel8_conv, *args, **kwargs)
+
+
 def enable_native_timing() -> None:
     gt_ops.build_subm_runtime_from_coords = timed_build_subm
     gt_ops.build_full_runtime_from_coords = timed_build_full
     gt_ops.build_reverse_runtime_from_full_runtime = timed_build_reverse
     gt_ops._conv = timed_conv
+    kernel3.GeometricTemplateKernel3Conv3d.build_runtime = timed_kernel3_build
+    kernel3.kernel3_conv = timed_kernel3_conv
+    kernel9.GeometricTemplateKernel9Conv3d.build_runtime = timed_kernel9_build
+    kernel9.kernel9_conv = timed_kernel9_conv
+    kernel8.GeometricTemplateKernel8Conv3d.build_runtime = timed_kernel8_build
+    kernel8.Kernel8ReverseSpec.build = timed_kernel8_reverse_build
+    kernel8._conv = timed_kernel8_conv
 
 
 def elapsed_sum(events) -> float:

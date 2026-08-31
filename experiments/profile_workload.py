@@ -9,11 +9,29 @@ from tqdm.auto import tqdm
 from experiments.workloads import WORKLOADS, build_workload, move_batch, sparse_forward
 from gtsparse.sparse3d.geometric_template.runtime import PAYLOAD_LOGICAL_TO_ACTUAL, TEMPLATE_KEEP_SLOTS
 import gtsparse.sparse3d.geometric_template.ops as gt_ops
+from gtsparse.sparse3d.geometric_template import (
+    GeometricTemplateKernel3Conv3d,
+    GeometricTemplateKernel8Conv3d,
+    GeometricTemplateKernel8InverseConv3d,
+    GeometricTemplateKernel9Conv3d,
+)
 
 
 capture = False
 current_layers = []
 original_conv = gt_ops._conv
+
+K3_OFFSETS = ((0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2))
+K9_OFFSETS = (
+    (4,), (0, 3, 4, 6), (1, 4, 7), (2, 4, 5, 8),
+    (1, 2, 4, 5, 7, 8), (0, 2, 3, 4, 5, 6, 8),
+    (0, 1, 3, 4, 6, 7), tuple(range(9)),
+)
+K8_OFFSETS = (
+    (), *((offset,) for offset in range(8)),
+    (0, 1, 2, 3), (4, 5, 6, 7), (0, 1, 4, 5),
+    (2, 3, 6, 7), (0, 2, 4, 6), (1, 3, 5, 7), tuple(range(8)),
+)
 
 
 def _template_buffer(runtime, template_id: int, count: int):
@@ -80,6 +98,85 @@ def observe_runtime(kind, features, logical_weight, runtime) -> None:
     )
 
 
+def _special_buffer(runtime, kind, template_id, count):
+    if kind == "kernel3":
+        if template_id < 3:
+            return runtime.input_rows_w1[template_id, :count, :1]
+        if template_id < 6:
+            return runtime.input_rows_w2[template_id - 3, :count, :2]
+        return runtime.input_rows_w3[0, :count, :3]
+    if kind == "kernel9":
+        if template_id == 0:
+            return runtime.input_rows_w1[0, :count, :1]
+        if template_id < 4:
+            return runtime.input_rows_w4[template_id - 1, :count, : len(K9_OFFSETS[template_id])]
+        if template_id < 7:
+            return runtime.input_rows_w7[template_id - 4, :count, : len(K9_OFFSETS[template_id])]
+        return runtime.input_rows_w9[0, :count, :9]
+    if template_id == 0:
+        return None
+    if template_id < 9:
+        return runtime.input_rows_w1[template_id - 1, :count, :1]
+    if template_id < 15:
+        return runtime.input_rows_w4[template_id - 9, :count, :4]
+    return runtime.input_rows_w8[0, :count, :8]
+
+
+def observe_special(kind, features, logical_weight, runtime, offsets) -> None:
+    counts = [int(value) for value in runtime.template_counts.tolist()]
+    padded_counts = [int(value) for value in runtime.padded_counts.tolist()]
+    masks = []
+    for template_id, count in enumerate(counts):
+        if count == 0:
+            continue
+        template_offsets = offsets[template_id]
+        if not template_offsets:
+            masks.append(np.zeros(count, dtype=np.uint32))
+            continue
+        buffer = _special_buffer(runtime, kind, template_id, count)
+        bits = torch.tensor([1 << offset for offset in template_offsets], device=buffer.device, dtype=torch.int64)
+        masks.append((((buffer >= 0).to(torch.int64) * bits).sum(dim=1)).cpu().numpy().astype(np.uint32))
+    masks = np.concatenate(masks) if masks else np.empty(0, dtype=np.uint32)
+    active_pairs = int(sum(int(value).bit_count() for value in masks))
+    issued_rows = sum(count * len(template) for count, template in zip(counts, offsets))
+    n_out = int(runtime.out_coords.size(0))
+    kernel_volume = max(max(template, default=-1) for template in offsets) + 1
+    cin = int(features.size(1))
+    cout = int(logical_weight.size(-1))
+    flops_per_pair = 2 * cin * cout
+    spconv_rows = {tile: _spconv_offset_rows(masks, tile) for tile in (32, 64, 128)}
+    current_layers.append({
+        "active_pairs": active_pairs, "cin": cin, "cout": cout,
+        "effective_flops": active_pairs * flops_per_pair,
+        "gtsparse_issued_flops": issued_rows * flops_per_pair,
+        "kind": kind, "minkowski_issued_flops": active_pairs * flops_per_pair,
+        "n_out": n_out, "padded_counts": padded_counts,
+        "spconv_issued_flops_bm32": spconv_rows[32] * flops_per_pair,
+        "spconv_issued_flops_bm64": spconv_rows[64] * flops_per_pair,
+        "spconv_issued_flops_bm128": spconv_rows[128] * flops_per_pair,
+        "template_counts": counts,
+        "torchsparse_issued_flops": n_out * kernel_volume * flops_per_pair,
+    })
+
+
+def special_hook(module, inputs, output):
+    if not capture:
+        return
+    sparse_input = inputs[0]
+    if isinstance(module, GeometricTemplateKernel3Conv3d):
+        runtime, _ = module.build_runtime(sparse_input)
+        observe_special("kernel3", sparse_input.features, module._runtime_weight(), runtime, K3_OFFSETS)
+    elif isinstance(module, GeometricTemplateKernel9Conv3d):
+        runtime, _ = module.build_runtime(sparse_input)
+        observe_special("kernel9", sparse_input.features, module._runtime_weight(), runtime, K9_OFFSETS)
+    elif isinstance(module, GeometricTemplateKernel8Conv3d):
+        runtime, _ = module.build_runtime(sparse_input)
+        observe_special("kernel8", sparse_input.features, module._runtime_weight(), runtime, K8_OFFSETS)
+    else:
+        runtime = sparse_input.metadata.reverse_chain[0].runtime.build()
+        observe_special("kernel8_inverse", sparse_input.features, module._runtime_weight(), runtime, K8_OFFSETS)
+
+
 def observed_conv(features, logical_weight, runtime):
     if capture:
         observe_runtime("native", features, logical_weight, runtime)
@@ -101,6 +198,16 @@ def main() -> None:
     args = parse_args()
     gt_ops._conv = observed_conv
     model, loader, dtype = build_workload(args.workload, "gtsparse", "fp16", args.frames, args.device)
+    handles = [
+        module.register_forward_hook(special_hook)
+        for module in model.modules()
+        if isinstance(module, (
+            GeometricTemplateKernel3Conv3d,
+            GeometricTemplateKernel8Conv3d,
+            GeometricTemplateKernel8InverseConv3d,
+            GeometricTemplateKernel9Conv3d,
+        ))
+    ]
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
@@ -120,6 +227,8 @@ def main() -> None:
                 torch.cuda.synchronize(args.device)
                 family_counts = [0, 0, 0, 0]
                 for layer in current_layers:
+                    if layer["kind"] != "native":
+                        continue
                     counts = layer["template_counts"]
                     family_counts[0] += counts[0]
                     family_counts[1] += sum(counts[1:4])
@@ -139,6 +248,8 @@ def main() -> None:
                 json.dump(record, output, sort_keys=True)
                 output.write("\n")
                 output.flush()
+    for handle in handles:
+        handle.remove()
 
 
 if __name__ == "__main__":

@@ -35,6 +35,12 @@ class Kernel3Runtime:
     coord_hashmap: torch.Tensor
 
 
+def kernel3_conv(features, weight, runtime):
+    fn = _C.gtsparse_kernel3_fp16_forward if features.dtype == torch.float16 else _C.gtsparse_kernel3_fp32_forward
+    return fn(features, weight, runtime.out_rows, runtime.input_rows_w1, runtime.input_rows_w2,
+              runtime.input_rows_w3, runtime.template_ids, runtime.input_row_offsets, runtime.out_coords.size(0))
+
+
 class GeometricTemplateKernel3Conv3d(nn.Module):
     def __init__(
         self,
@@ -112,18 +118,7 @@ class GeometricTemplateKernel3Conv3d(nn.Module):
     def forward(self, x: GTSparseSparseConvTensor) -> GTSparseSparseConvTensor:
         runtime, out_spatial = self.build_runtime(x)
         weight = self._runtime_weight()
-        fn = _C.gtsparse_kernel3_fp16_forward if x.features.dtype == torch.float16 else _C.gtsparse_kernel3_fp32_forward
-        out_features = fn(
-            x.features,
-            weight,
-            runtime.out_rows,
-            runtime.input_rows_w1,
-            runtime.input_rows_w2,
-            runtime.input_rows_w3,
-            runtime.template_ids,
-            runtime.input_row_offsets,
-            runtime.out_coords.size(0),
-        )
+        out_features = kernel3_conv(x.features, weight, runtime)
         if self.bias is not None:
             out_features = out_features + self.bias.view(1, -1)
         return x.replace_sparse(
