@@ -182,7 +182,7 @@ def breakdown_rows(root: Path, summaries):
         dtype = records[0]["dtype"]
         gpu = records[0]["gpu"]
         workload = records[0]["workload"]
-        metric = "end2end" if workload.startswith("minkunet") else "conv_only"
+        metric = "end2end"
         targets = [
             row
             for row in summaries
