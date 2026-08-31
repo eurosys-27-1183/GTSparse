@@ -1,0 +1,257 @@
+#!/usr/bin/env python3
+
+import argparse
+import itertools
+import json
+import math
+from pathlib import Path
+import statistics
+import sys
+
+import torch
+
+sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
+
+from experiments.workloads import build_workload, move_batch
+
+
+TARGETS = {
+    "second_kitti_sweeps1": (
+        "sparse_backbone.conv_out.block.0",
+    ),
+    "voxelnext_nuscenes_sweeps1": (
+        "sparse_backbone.bev_tail.conv_out.0",
+        "sparse_backbone.bev_tail.shared_conv.0",
+    ),
+    "voxelnext_nuscenes_sweeps10": (
+        "sparse_backbone.bev_tail.conv_out.0",
+        "sparse_backbone.bev_tail.shared_conv.0",
+    ),
+    "minkunet_semantickitti_sweeps1": (
+        "sparse_backbone.down1.down.0",
+        "sparse_backbone.down2.down.0",
+        "sparse_backbone.down3.down.0",
+        "sparse_backbone.down4.down.0",
+        "sparse_backbone.up4.up.0",
+        "sparse_backbone.up3.up.0",
+        "sparse_backbone.up2.up.0",
+        "sparse_backbone.up1.up.0",
+    ),
+}
+
+
+def parse_args():
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--workload", choices=tuple(TARGETS), required=True)
+    parser.add_argument("--warmup", type=int, default=5)
+    parser.add_argument("--repeats", type=int, default=20)
+    parser.add_argument("--sample-index", type=int, default=0)
+    parser.add_argument("--device", default="cuda:0")
+    parser.add_argument("--out", type=Path)
+    return parser.parse_args()
+
+
+def normalize_tuple(value, dimensions):
+    if isinstance(value, int):
+        return (value,) * dimensions
+    return tuple(int(item) for item in value)
+
+
+def sparse_features(tensor):
+    if hasattr(tensor, "feats"):
+        return tensor.feats
+    return tensor.features
+
+
+def sparse_coords(tensor):
+    if hasattr(tensor, "coords"):
+        return tensor.coords
+    return tensor.indices
+
+
+def mask_summary(active):
+    volume = int(active.size(1))
+    bits = 1 << torch.arange(volume, device=active.device, dtype=torch.int64)
+    masks = (active.to(torch.int64) * bits).sum(dim=1)
+    unique, counts = torch.unique(masks, return_counts=True)
+    pairs = sorted(
+        zip(unique.cpu().tolist(), counts.cpu().tolist()),
+        key=lambda item: (-item[1], item[0]),
+    )
+    total = max(1, int(active.size(0)))
+    return {
+        "active_width_mean": float(active.sum().item()) / total,
+        "mask_histogram": {str(mask): int(count) for mask, count in pairs},
+    }
+
+
+def torchsparse_active_map(module, tensor):
+    kernel = normalize_tuple(module.kernel_size, 3)
+    stride = normalize_tuple(module.stride, 3)
+    dilation = normalize_tuple(module.dilation, 3)
+    tensor_stride = tuple(int(value) for value in tensor.stride)
+    if module.transposed:
+        tensor_stride = tuple(tensor_stride[dim] // stride[dim] for dim in range(3))
+    key = (tensor_stride, kernel, stride, dilation)
+    kmap = tensor._caches.kmaps[key]
+    n_in, n_out = (int(value) for value in kmap["sizes"])
+    forward_rows = kmap["out_in_map"][:n_out, : math.prod(kernel)]
+    if not module.transposed:
+        return forward_rows.ge(0)
+    reverse = torch.zeros((n_in, forward_rows.size(1)), device=forward_rows.device, dtype=torch.bool)
+    slots = torch.arange(forward_rows.size(1), device=forward_rows.device)
+    slots = slots.view(1, -1).expand_as(forward_rows)
+    valid = forward_rows.ge(0)
+    reverse[forward_rows[valid].long(), slots[valid]] = True
+    return reverse
+
+
+def spconv_active_map(module, input_tensor, output_tensor):
+    kernel = normalize_tuple(module.kernel_size, 2)
+    stride = normalize_tuple(module.stride, 2)
+    padding = normalize_tuple(module.padding, 2)
+    dilation = normalize_tuple(module.dilation, 2)
+    input_coords = input_tensor.indices.to(torch.int64)
+    output_coords = output_tensor.indices.to(torch.int64)
+    height, width = (int(value) for value in input_tensor.spatial_shape)
+    input_keys = (input_coords[:, 0] * height + input_coords[:, 1]) * width + input_coords[:, 2]
+    sorted_keys, _ = torch.sort(input_keys)
+    offsets = torch.cartesian_prod(
+        torch.arange(kernel[0], device=input_coords.device),
+        torch.arange(kernel[1], device=input_coords.device),
+    )
+    query_xy = (
+        output_coords[:, None, 1:] * torch.tensor(stride, device=input_coords.device)
+        - torch.tensor(padding, device=input_coords.device)
+        + offsets[None] * torch.tensor(dilation, device=input_coords.device)
+    )
+    valid = ((query_xy >= 0) & (query_xy < torch.tensor((height, width), device=input_coords.device))).all(dim=2)
+    batches = output_coords[:, None, 0].expand(-1, offsets.size(0))
+    query_keys = (batches * height + query_xy[:, :, 0]) * width + query_xy[:, :, 1]
+    positions = torch.searchsorted(sorted_keys, query_keys.flatten())
+    safe = positions.clamp_max(max(0, int(sorted_keys.numel()) - 1))
+    found = positions.lt(sorted_keys.numel())
+    found &= sorted_keys.index_select(0, safe) == query_keys.flatten()
+    return (valid.flatten() & found).view(output_coords.size(0), offsets.size(0))
+
+
+def module_description(module):
+    kernel = tuple(int(value) for value in module.kernel_size)
+    dimensions = len(kernel)
+    return {
+        "backend": module.__module__.split(".", 1)[0],
+        "kernel_size": kernel,
+        "stride": normalize_tuple(module.stride, dimensions),
+        "transposed": bool(getattr(module, "transposed", False)),
+        "in_channels": int(module.in_channels),
+        "out_channels": int(module.out_channels),
+    }
+
+
+def profile_forward(model, workload, voxel_features, voxel_coords, batch_size):
+    if workload.startswith("voxelnext_"):
+        return model.sparse_backbone(voxel_features, voxel_coords, batch_size)
+    return model.forward_sparse_backbone(voxel_features, voxel_coords, batch_size)
+
+
+def print_summary(result):
+    print(f"GPU: {result['gpu']}")
+    print(f"Workload: {result['workload']}")
+    print(f"Sample index: {result['sample_index']}")
+    for layer in result["layers"]:
+        kernel = "x".join(str(value) for value in layer["kernel_size"])
+        stride = "x".join(str(value) for value in layer["stride"])
+        print(
+            f"\n{layer['name']} ({layer['backend']}, kernel={kernel}, stride={stride}, "
+            f"transposed={layer['transposed']})"
+        )
+        print(
+            f"  channels: {layer['in_channels']} -> {layer['out_channels']}; "
+            f"rows: {layer['input_rows']} -> {layer['output_rows']}"
+        )
+        print(
+            f"  latency: median={layer['latency_median_ms']:.5f} ms, "
+            f"mean={layer['latency_mean_ms']:.5f} ms"
+        )
+        print(
+            f"  active width: {layer['active_width_mean']:.5f} / "
+            f"{math.prod(layer['kernel_size'])}; masks={len(layer['mask_histogram'])}"
+        )
+        top = list(layer["mask_histogram"].items())[:16]
+        print("  top masks: " + ", ".join(f"{mask}:{count}" for mask, count in top))
+
+
+def main():
+    args = parse_args()
+    model, loader, dtype = build_workload(
+        args.workload, "gtsparse", "fp16", int(args.sample_index) + 1, args.device
+    )
+    batch = move_batch(next(itertools.islice(loader, int(args.sample_index), None)), args.device, dtype)
+    modules = dict(model.named_modules())
+    captures = {
+        name: {"module": modules[name], "events": []}
+        for name in TARGETS[args.workload]
+    }
+    handles = []
+
+    for name, capture in captures.items():
+        def pre_hook(module, inputs, layer=name):
+            start = torch.cuda.Event(enable_timing=True)
+            start.record()
+            captures[layer]["input"] = inputs[0]
+            captures[layer]["start"] = start
+
+        def post_hook(module, inputs, output, layer=name):
+            end = torch.cuda.Event(enable_timing=True)
+            end.record()
+            captures[layer]["output"] = output
+            captures[layer]["events"].append((captures[layer]["start"], end))
+
+        handles.append(capture["module"].register_forward_pre_hook(pre_hook))
+        handles.append(capture["module"].register_forward_hook(post_hook))
+
+    voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
+    with torch.inference_mode():
+        for _ in range(int(args.warmup) + int(args.repeats)):
+            profile_forward(model, args.workload, voxel_features, voxel_coords, batch_size)
+    torch.cuda.synchronize(args.device)
+
+    layers = []
+    for name, capture in captures.items():
+        module = capture["module"]
+        input_tensor = capture["input"]
+        output_tensor = capture["output"]
+        elapsed = [start.elapsed_time(end) for start, end in capture["events"][-int(args.repeats):]]
+        if module.__module__.startswith("torchsparse"):
+            active = torchsparse_active_map(module, input_tensor)
+        else:
+            active = spconv_active_map(module, input_tensor, output_tensor)
+        layer = {
+            "name": name,
+            **module_description(module),
+            "input_rows": int(sparse_features(input_tensor).size(0)),
+            "output_rows": int(sparse_features(output_tensor).size(0)),
+            "latency_median_ms": float(statistics.median(elapsed)),
+            "latency_mean_ms": float(statistics.mean(elapsed)),
+            **mask_summary(active),
+        }
+        layers.append(layer)
+
+    for handle in handles:
+        handle.remove()
+    result = {
+        "gpu": torch.cuda.get_device_name(torch.device(args.device)),
+        "workload": args.workload,
+        "sample_index": int(args.sample_index),
+        "layers": layers,
+    }
+    text = json.dumps(result, indent=2, sort_keys=True)
+    print_summary(result)
+    if args.out is not None:
+        args.out.parent.mkdir(parents=True, exist_ok=True)
+        args.out.write_text(text + "\n")
+        print(f"\nWrote {args.out}")
+
+
+if __name__ == "__main__":
+    main()
