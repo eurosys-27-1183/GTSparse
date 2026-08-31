@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 from .metadata import GeometricTemplateMetadata, GeometricTemplateReverseEdge, empty_metadata, ensure_metadata
+from .kernel3 import GeometricTemplateKernel3Conv3d, Kernel3Runtime
 from .modules import (
     GeometricTemplateSparseConv3d,
     GeometricTemplateSparseInverseConv3d,
@@ -23,8 +24,10 @@ from .weights import permute_weight_to_runtime_order
 __all__ = [
     "BM",
     "GeometricTemplateMetadata",
+    "GeometricTemplateKernel3Conv3d",
     "GeometricTemplateReverseEdge",
     "GeometricTemplateRuntime",
+    "Kernel3Runtime",
     "GeometricTemplateSparseConv3d",
     "GeometricTemplateSparseInverseConv3d",
     "GeometricTemplateSparseSequential",

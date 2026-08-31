@@ -13,11 +13,12 @@ import torch
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
 from experiments.workloads import build_workload, move_batch
+from gtsparse import _C
 
 
 TARGETS = {
     "second_kitti_sweeps1": (
-        "sparse_backbone.conv_out.block.0",
+        "sparse_backbone.conv_out.conv",
     ),
     "voxelnext_nuscenes_sweeps1": (
         "sparse_backbone.bev_tail.conv_out.0",
@@ -83,6 +84,48 @@ def mask_summary(active):
         "active_width_mean": float(active.sum().item()) / total,
         "mask_histogram": {str(mask): int(count) for mask, count in pairs},
     }
+
+
+def kernel3_mask_summary(runtime):
+    counts = runtime.template_counts.cpu().tolist()
+    masks = (1, 2, 4, 3, 5, 6, 7)
+    histogram = sorted(
+        ((mask, int(count)) for mask, count in zip(masks, counts) if count),
+        key=lambda item: (-item[1], item[0]),
+    )
+    total = max(1, sum(counts))
+    return {
+        "active_width_mean": sum(mask.bit_count() * count for mask, count in histogram) / total,
+        "mask_histogram": {str(mask): count for mask, count in histogram},
+    }
+
+
+def kernel3_latency(module, input_tensor, runtime, repeats):
+    fn = (
+        _C.gtsparse_kernel3_fp16_forward
+        if sparse_features(input_tensor).dtype == torch.float16
+        else _C.gtsparse_kernel3_fp32_forward
+    )
+    events = []
+    for _ in range(int(repeats)):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn(
+            sparse_features(input_tensor),
+            module._runtime_weight(),
+            runtime.out_rows,
+            runtime.input_rows_w1,
+            runtime.input_rows_w2,
+            runtime.input_rows_w3,
+            runtime.template_ids,
+            runtime.input_row_offsets,
+            runtime.out_coords.size(0),
+        )
+        end.record()
+        events.append((start, end))
+    torch.cuda.synchronize(sparse_features(input_tensor).device)
+    return statistics.median(start.elapsed_time(end) for start, end in events)
 
 
 def torchsparse_active_map(module, tensor):
@@ -173,6 +216,11 @@ def print_summary(result):
             f"  latency: median={layer['latency_median_ms']:.5f} ms, "
             f"mean={layer['latency_mean_ms']:.5f} ms"
         )
+        if "kernel_latency_median_ms" in layer:
+            print(
+                f"  native split: builder={layer['builder_latency_median_ms']:.5f} ms, "
+                f"kernel={layer['kernel_latency_median_ms']:.5f} ms"
+            )
         print(
             f"  active width: {layer['active_width_mean']:.5f} / "
             f"{math.prod(layer['kernel_size'])}; masks={len(layer['mask_histogram'])}"
@@ -222,10 +270,15 @@ def main():
         input_tensor = capture["input"]
         output_tensor = capture["output"]
         elapsed = [start.elapsed_time(end) for start, end in capture["events"][-int(args.repeats):]]
-        if module.__module__.startswith("torchsparse"):
+        if module.__module__.endswith(".kernel3"):
+            runtime, _ = module.build_runtime(input_tensor)
+            summary = kernel3_mask_summary(runtime)
+        elif module.__module__.startswith("torchsparse"):
             active = torchsparse_active_map(module, input_tensor)
+            summary = mask_summary(active)
         else:
             active = spconv_active_map(module, input_tensor, output_tensor)
+            summary = mask_summary(active)
         layer = {
             "name": name,
             **module_description(module),
@@ -233,8 +286,12 @@ def main():
             "output_rows": int(sparse_features(output_tensor).size(0)),
             "latency_median_ms": float(statistics.median(elapsed)),
             "latency_mean_ms": float(statistics.mean(elapsed)),
-            **mask_summary(active),
+            **summary,
         }
+        if module.__module__.endswith(".kernel3"):
+            kernel_ms = kernel3_latency(module, input_tensor, runtime, args.repeats)
+            layer["kernel_latency_median_ms"] = kernel_ms
+            layer["builder_latency_median_ms"] = layer["latency_median_ms"] - kernel_ms
         layers.append(layer)
 
     for handle in handles:

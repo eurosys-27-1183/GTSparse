@@ -3,6 +3,54 @@
 #include <pybind11/pybind11.h>
 #include <torch/extension.h>
 
+torch::Tensor kernel3_fp16_forward(
+    torch::Tensor features,
+    torch::Tensor logical_weight,
+    torch::Tensor out_rows,
+    torch::Tensor input_rows_w1,
+    torch::Tensor input_rows_w2,
+    torch::Tensor input_rows_w3,
+    torch::Tensor template_ids,
+    torch::Tensor input_row_offsets,
+    int64_t n_out);
+
+torch::Tensor kernel3_fp32_forward(
+    torch::Tensor features,
+    torch::Tensor logical_weight,
+    torch::Tensor out_rows,
+    torch::Tensor input_rows_w1,
+    torch::Tensor input_rows_w2,
+    torch::Tensor input_rows_w3,
+    torch::Tensor template_ids,
+    torch::Tensor input_row_offsets,
+    int64_t n_out);
+
+std::tuple<
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor,
+    torch::Tensor>
+build_kernel3_full_runtime_from_coords(
+    torch::Tensor in_coords,
+    int oD,
+    int oH,
+    int oW,
+    int stride_d,
+    int stride_h,
+    int stride_w,
+    int pad_d,
+    int pad_h,
+    int pad_w,
+    int dil_d,
+    int max_bm,
+    torch::Tensor lookup_coord_hashmap = torch::Tensor());
+
 torch::Tensor finalize_row_template_center_last_fp32_forward(
     torch::Tensor features,
     torch::Tensor logical_weight,
@@ -317,3 +365,4 @@ void register_gtsparse3d_finalize_row_template_center_last_build_full_runtime_cu
 void register_gtsparse3d_finalize_row_template_center_last_build_runtime_from_dense_out_in_map_cuda(pybind11::module& m);
 void register_gtsparse3d_finalize_row_template_center_last_build_reverse_runtime_cuda(pybind11::module& m);
 void register_gtsparse3d_finalize_row_template_center_last_build_reverse_from_full_runtime_cuda(pybind11::module& m);
+void register_gtsparse_kernel3_cuda(pybind11::module& m);

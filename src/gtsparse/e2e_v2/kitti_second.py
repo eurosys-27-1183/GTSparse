@@ -25,6 +25,7 @@ torchsparse.backends.allow_tf32 = False
 
 from .common import measure_cuda_elapsed_ms, require_cuda_device, resolve_runtime_dtype
 from gtsparse.sparse3d.geometric_template import (
+    GeometricTemplateKernel3Conv3d,
     GeometricTemplateSparseConv3d,
     GeometricTemplateSubMConv3d,
 )
@@ -1027,13 +1028,16 @@ class GeometricTemplateVoxelBackBone8x(nn.Module):
         self.conv2 = _GTDownStage(model_cfg.conv_input_channels, model_cfg.conv2_channels, padding=1, sorted=bool(sorted))
         self.conv3 = _GTDownStage(model_cfg.conv2_channels, model_cfg.conv3_channels, padding=1, sorted=bool(sorted))
         self.conv4 = _GTDownStage(model_cfg.conv3_channels, model_cfg.conv4_channels, padding=(0, 1, 1), sorted=bool(sorted))
-        self.conv_out = _TorchSparseTailBlock(
-            model_cfg.conv4_channels,
+        self.conv_out = _GTPostActBlock(
+            GeometricTemplateKernel3Conv3d(
+                model_cfg.conv4_channels,
+                model_cfg.conv_out_channels,
+                (3, 1, 1),
+                stride=(2, 1, 1),
+                padding=0,
+                bias=False,
+            ),
             model_cfg.conv_out_channels,
-            (3, 1, 1),
-            stride=(2, 1, 1),
-            padding=0,
-            layer_name="conv_out",
         )
         self.out_channels = model_cfg.conv_out_channels
 
