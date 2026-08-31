@@ -8,21 +8,28 @@ namespace {
 using namespace gtsparse_kernel8;
 using namespace gtsparse_kernel8_builder;
 
-static __global__ void enumerate_kernel(const int* coords,int64_t* keys,int* total,int n,
-    int D,int H,int W,int sd,int sh,int sw,int pd,int ph,int pw,int dd,int dh,int dw){
-    using Scan=cub::BlockScan<int,256>;__shared__ typename Scan::TempStorage storage;__shared__ int block_base;
-    const int row=blockIdx.x*blockDim.x+threadIdx.x;int64_t local[8];int count=0;
-    if(row<n){const int b=coords[row*4],d=coords[row*4+1],h=coords[row*4+2],w=coords[row*4+3];
-        #pragma unroll
-        for(int off=0;off<8;++off){const int rd=off/4,rh=(off/2)%2,rw=off%2;
-            int od=d+pd-rd*dd,oh=h+ph-rh*dh,ow=w+pw-rw*dw;
-            if(od%sd||oh%sh||ow%sw)continue;od/=sd;oh/=sh;ow/=sw;
-            if(od>=0&&od<D&&oh>=0&&oh<H&&ow>=0&&ow<W)local[count++]=key(b,od,oh,ow,D,H,W);
-        }}
-    int base=0,block_count=0;Scan(storage).ExclusiveSum(count,base,block_count);
-    if(threadIdx.x==0)block_base=block_count?atomicAdd(total,block_count):0;__syncthreads();
-    #pragma unroll
-    for(int i=0;i<8;++i)if(i<count)keys[block_base+base+i]=local[i];
+static __global__ void enumerate_kernel(
+    const int* coords,
+    int64_t* keys,
+    int* invalid_count,
+    int n,
+    int D,
+    int H,
+    int W) {
+    const int row = blockIdx.x * blockDim.x + threadIdx.x;
+    if (row >= n) {
+        return;
+    }
+    const int b = coords[row * 4];
+    const int d = coords[row * 4 + 1] >> 1;
+    const int h = coords[row * 4 + 2] >> 1;
+    const int w = coords[row * 4 + 3] >> 1;
+    if (d < D && h < H && w < W) {
+        keys[row] = key(b, d, h, w, D, H, W);
+    } else {
+        keys[row] = 0x7fffffffffffffffLL;
+        atomicAdd(invalid_count, 1);
+    }
 }
 
 static __global__ void build_full_kernel(const int64_t* keys,CoordHashMap map,int* out_coords,
@@ -68,18 +75,19 @@ build_kernel8_full_runtime(torch::Tensor coords,int D,int H,int W,int sd,int sh,
     int dd,int dh,int dw,int bm,torch::Tensor input_hash){
     c10::cuda::CUDAGuard guard(coords.device());cudaStream_t stream=at::cuda::getCurrentCUDAStream();
     const int n=coords.size(0);auto opts=coords.options().dtype(torch::kInt32),key_opts=coords.options().dtype(torch::kInt64);
-    auto candidates=torch::empty({static_cast<int64_t>(n)*8},key_opts),num=torch::zeros({1},opts);
-    enumerate_kernel<<<(n+255)/256,256,0,stream>>>(coords.data_ptr<int>(),candidates.data_ptr<int64_t>(),num.data_ptr<int>(),n,D,H,W,sd,sh,sw,pd,ph,pw,dd,dh,dw);
-    C10_CUDA_CHECK(cudaStreamSynchronize(stream));const int candidate_count=num.item<int>();
-    auto sorted=torch::empty({candidate_count},key_opts);size_t sort_bytes=0;
-    cub::DeviceRadixSort::SortKeys(nullptr,sort_bytes,candidates.data_ptr<int64_t>(),sorted.data_ptr<int64_t>(),candidate_count,0,64,stream);
+    auto candidates=torch::empty({n},key_opts),counts=torch::zeros({2},opts);
+    enumerate_kernel<<<(n+255)/256,256,0,stream>>>(coords.data_ptr<int>(),candidates.data_ptr<int64_t>(),counts.data_ptr<int>()+1,n,D,H,W);
+    auto sorted=torch::empty({n},key_opts);size_t sort_bytes=0;
+    cub::DeviceRadixSort::SortKeys(nullptr,sort_bytes,candidates.data_ptr<int64_t>(),sorted.data_ptr<int64_t>(),n,0,64,stream);
     auto sort_temp=torch::empty({static_cast<int64_t>(sort_bytes)},coords.options().dtype(torch::kUInt8));
-    cub::DeviceRadixSort::SortKeys(sort_temp.data_ptr(),sort_bytes,candidates.data_ptr<int64_t>(),sorted.data_ptr<int64_t>(),candidate_count,0,64,stream);
-    auto unique=torch::empty({candidate_count},key_opts),num_unique=torch::zeros({1},opts);size_t unique_bytes=0;
-    cub::DeviceSelect::Unique(nullptr,unique_bytes,sorted.data_ptr<int64_t>(),unique.data_ptr<int64_t>(),num_unique.data_ptr<int>(),candidate_count,stream);
+    cub::DeviceRadixSort::SortKeys(sort_temp.data_ptr(),sort_bytes,candidates.data_ptr<int64_t>(),sorted.data_ptr<int64_t>(),n,0,64,stream);
+    auto unique=torch::empty({n},key_opts);size_t unique_bytes=0;
+    cub::DeviceSelect::Unique(nullptr,unique_bytes,sorted.data_ptr<int64_t>(),unique.data_ptr<int64_t>(),counts.data_ptr<int>(),n,stream);
     auto unique_temp=torch::empty({static_cast<int64_t>(unique_bytes)},coords.options().dtype(torch::kUInt8));
-    cub::DeviceSelect::Unique(unique_temp.data_ptr(),unique_bytes,sorted.data_ptr<int64_t>(),unique.data_ptr<int64_t>(),num_unique.data_ptr<int>(),candidate_count,stream);
-    C10_CUDA_CHECK(cudaStreamSynchronize(stream));const int n_out=num_unique.item<int>();
+    cub::DeviceSelect::Unique(unique_temp.data_ptr(),unique_bytes,sorted.data_ptr<int64_t>(),unique.data_ptr<int64_t>(),counts.data_ptr<int>(),n,stream);
+    int host_counts[2];
+    C10_CUDA_CHECK(cudaMemcpyAsync(host_counts,counts.data_ptr<int>(),sizeof(host_counts),cudaMemcpyDeviceToHost,stream));
+    C10_CUDA_CHECK(cudaStreamSynchronize(stream));const int n_out=host_counts[0]-(host_counts[1]>0);
     auto b=allocate(n_out,bm,opts);auto out_coords=torch::empty({n_out,4},opts);CoordHashMap map;CoordHashMapOwner owner;
     if(input_hash.defined()&&input_hash.numel())map=view_coord_hashmap(input_hash);else{owner=build_coord_hashmap(coords,stream);map=owner.map;}
     const int stride=b.w1.size(1);build_full_kernel<<<(n_out+kBuilderWarpsPerBlock-1)/kBuilderWarpsPerBlock,kBuilderThreads,0,stream>>>(

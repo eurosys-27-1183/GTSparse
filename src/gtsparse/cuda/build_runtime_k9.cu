@@ -67,10 +67,10 @@ static __global__ void build_subm_runtime_kernel(
         template_out_rows, input_rows_w1, input_rows_w4, input_rows_w7, input_rows_w9);
 }
 
-static __global__ void enumerate_output_coord_keys_compact_kernel(
+static __global__ void enumerate_output_coord_keys_kernel(
     const int* __restrict__ in_coords,
     int64_t* __restrict__ out_keys,
-    int* __restrict__ total_candidates,
+    int* __restrict__ invalid_present,
     int n_in,
     int oD,
     int oH,
@@ -83,49 +83,34 @@ static __global__ void enumerate_output_coord_keys_compact_kernel(
     int pad_w,
     int dil_d,
     int dil_h) {
-    using BlockScan = cub::BlockScan<int, 256>;
-    __shared__ typename BlockScan::TempStorage scan_storage;
-    __shared__ int block_base;
     const int row = blockIdx.x * blockDim.x + threadIdx.x;
-    int64_t local_keys[kNumLogicalOffsets];
-    int local_count = 0;
-
-    if (row < n_in) {
-        const int b = in_coords[row * 4 + 0];
-        const int d = in_coords[row * 4 + 1];
-        const int h = in_coords[row * 4 + 2];
-        const int w = in_coords[row * 4 + 3];
-        #pragma unroll
-        for (int offset = 0; offset < kNumLogicalOffsets; ++offset) {
-            const int rd = offset / 3;
-            const int rh = offset - rd * 3;
-            int od = d + pad_d - rd * dil_d;
-            int oh = h + pad_h - rh * dil_h;
-            int ow = w + pad_w;
-            if (od % stride_d != 0 || oh % stride_h != 0 || ow % stride_w != 0) {
-                continue;
-            }
+    if (row >= n_in) {
+        return;
+    }
+    const int b = in_coords[row * 4 + 0];
+    const int d = in_coords[row * 4 + 1];
+    const int h = in_coords[row * 4 + 2];
+    const int w = in_coords[row * 4 + 3];
+    #pragma unroll
+    for (int offset = 0; offset < kNumLogicalOffsets; ++offset) {
+        const int rd = offset / 3;
+        const int rh = offset - rd * 3;
+        int od = d + pad_d - rd * dil_d;
+        int oh = h + pad_h - rh * dil_h;
+        int ow = w + pad_w;
+        bool valid = od % stride_d == 0 && oh % stride_h == 0 && ow % stride_w == 0;
+        if (valid) {
             od /= stride_d;
             oh /= stride_h;
             ow /= stride_w;
-            if (od < 0 || od >= oD || oh < 0 || oh >= oH || ow < 0 || ow >= oW) {
-                continue;
-            }
-            local_keys[local_count++] = output_coord_linear_key(b, od, oh, ow, oD, oH, oW);
+            valid = od >= 0 && od < oD && oh >= 0 && oh < oH && ow >= 0 && ow < oW;
         }
-    }
-
-    int local_base = 0;
-    int block_count = 0;
-    BlockScan(scan_storage).ExclusiveSum(local_count, local_base, block_count);
-    if (threadIdx.x == 0) {
-        block_base = block_count > 0 ? atomicAdd(total_candidates, block_count) : 0;
-    }
-    __syncthreads();
-    #pragma unroll
-    for (int index = 0; index < kNumLogicalOffsets; ++index) {
-        if (index < local_count) {
-            out_keys[block_base + local_base + index] = local_keys[index];
+        if (valid) {
+            out_keys[row * kNumLogicalOffsets + offset] =
+                output_coord_linear_key(b, od, oh, ow, oD, oH, oW);
+        } else {
+            out_keys[row * kNumLogicalOffsets + offset] = 0x7fffffffffffffffLL;
+            atomicExch(invalid_present, 1);
         }
     }
 }
@@ -285,15 +270,14 @@ build_kernel9_full_runtime_from_coords(
     auto int_opts = in_coords.options().dtype(torch::kInt32);
     auto key_opts = in_coords.options().dtype(torch::kInt64);
 
-    auto candidate_keys = torch::empty({static_cast<int64_t>(n) * kNumLogicalOffsets}, key_opts);
-    auto num_candidates = torch::zeros({1}, int_opts);
-    enumerate_output_coord_keys_compact_kernel<<<(n + 255) / 256, 256, 0, stream>>>(
+    const int candidate_count = n * kNumLogicalOffsets;
+    auto candidate_keys = torch::empty({candidate_count}, key_opts);
+    auto counts = torch::zeros({2}, int_opts);
+    enumerate_output_coord_keys_kernel<<<(n + 255) / 256, 256, 0, stream>>>(
         in_coords.data_ptr<int>(), candidate_keys.data_ptr<int64_t>(),
-        num_candidates.data_ptr<int>(), n, oD, oH, oW,
+        counts.data_ptr<int>() + 1, n, oD, oH, oW,
         stride_d, stride_h, stride_w, pad_d, pad_h, pad_w, dil_d, dil_h);
     C10_CUDA_KERNEL_LAUNCH_CHECK();
-    C10_CUDA_CHECK(cudaStreamSynchronize(stream));
-    const int candidate_count = num_candidates.item<int>();
 
     auto sorted_keys = torch::empty({candidate_count}, key_opts);
     size_t sort_bytes = 0;
@@ -306,17 +290,19 @@ build_kernel9_full_runtime_from_coords(
         sorted_keys.data_ptr<int64_t>(), candidate_count, 0, 64, stream);
 
     auto unique_keys = torch::empty({candidate_count}, key_opts);
-    auto num_unique = torch::zeros({1}, int_opts);
     size_t unique_bytes = 0;
     cub::DeviceSelect::Unique(
         nullptr, unique_bytes, sorted_keys.data_ptr<int64_t>(),
-        unique_keys.data_ptr<int64_t>(), num_unique.data_ptr<int>(), candidate_count, stream);
+        unique_keys.data_ptr<int64_t>(), counts.data_ptr<int>(), candidate_count, stream);
     auto unique_temp = torch::empty({static_cast<int64_t>(unique_bytes)}, in_coords.options().dtype(torch::kUInt8));
     cub::DeviceSelect::Unique(
         unique_temp.data_ptr(), unique_bytes, sorted_keys.data_ptr<int64_t>(),
-        unique_keys.data_ptr<int64_t>(), num_unique.data_ptr<int>(), candidate_count, stream);
+        unique_keys.data_ptr<int64_t>(), counts.data_ptr<int>(), candidate_count, stream);
+    int host_counts[2];
+    C10_CUDA_CHECK(cudaMemcpyAsync(
+        host_counts, counts.data_ptr<int>(), sizeof(host_counts), cudaMemcpyDeviceToHost, stream));
     C10_CUDA_CHECK(cudaStreamSynchronize(stream));
-    const int n_out = num_unique.item<int>();
+    const int n_out = host_counts[0] - host_counts[1];
 
     const int bm = static_cast<int>(max_bm);
     const int template_stride = ((n_out + bm - 1) / bm) * bm;

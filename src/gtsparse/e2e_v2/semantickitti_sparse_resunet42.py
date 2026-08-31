@@ -342,16 +342,7 @@ def _make_gtsparse_sparse_tensor(voxel_features: torch.Tensor, voxel_coords: tor
 
 
 def _cat_gtsparse(a: GTSparseSparseConvTensor, b: GTSparseSparseConvTensor) -> GTSparseSparseConvTensor:
-    if not torch.equal(a.indices, b.indices):
-        raise ValueError("GTSparse decoder fuse expects matching sparse coordinates")
-    return GTSparseSparseConvTensor(
-        torch.cat((a.features, b.features), dim=1),
-        a.indices,
-        a.spatial_shape,
-        a.batch_size,
-        coord_hashmap=a.coord_hashmap,
-        metadata=a.metadata,
-    )
+    return a.replace_feature_(torch.cat((a.features, b.features), dim=1))
 
 
 _TORCHSPARSE_VIEW_KEY = "torchsparse_view"
