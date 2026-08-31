@@ -225,7 +225,14 @@ def main() -> None:
     global capture
     args = parse_args()
     gt_ops._conv = observed_conv
-    model, loader, dtype = build_workload(args.workload, "gtsparse", "fp16", args.frames, args.device)
+    model, loader, dtype = build_workload(
+        args.workload,
+        "gtsparse",
+        "fp16",
+        args.frames,
+        args.device,
+        random_sample=True,
+    )
     handles = [
         module.register_forward_hook(special_hook)
         for module in model.modules()

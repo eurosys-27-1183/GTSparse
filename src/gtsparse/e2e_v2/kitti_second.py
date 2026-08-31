@@ -7,6 +7,7 @@ from dataclasses import asdict, dataclass, field
 import json
 import math
 from pathlib import Path
+import random
 import statistics
 from typing import Any, Sequence
 
@@ -1475,7 +1476,13 @@ def _parse_args() -> argparse.Namespace:
     return parser.parse_args()
 
 
-def _iter_sample_indices(dataset: KittiLidarDataset, *, frame_id: str, num_samples: int) -> list[int]:
+def _iter_sample_indices(
+    dataset: KittiLidarDataset,
+    *,
+    frame_id: str,
+    num_samples: int,
+    random_sample: bool = False,
+) -> list[int]:
     if frame_id:
         try:
             return [dataset.sample_ids.index(frame_id)]
@@ -1485,6 +1492,8 @@ def _iter_sample_indices(dataset: KittiLidarDataset, *, frame_id: str, num_sampl
         count = len(dataset)
     else:
         count = min(len(dataset), int(num_samples))
+    if random_sample and count < len(dataset):
+        return sorted(random.Random(0).sample(range(len(dataset)), count))
     return list(range(count))
 
 

@@ -1,4 +1,3 @@
-import random
 from pathlib import Path
 
 import torch
@@ -71,10 +70,12 @@ def build_workload(
     if runtime_dtype == torch.float16:
         model = model.half()
     model.eval()
-    if random_sample and 0 < int(frames) < len(dataset):
-        indices = sorted(random.Random(0).sample(range(len(dataset)), int(frames)))
-    else:
-        indices = _iter_sample_indices(dataset, frame_id="", num_samples=int(frames))
+    indices = _iter_sample_indices(
+        dataset,
+        frame_id="",
+        num_samples=int(frames),
+        random_sample=random_sample,
+    )
     loader = _make_loader(dataset, indices, config.data, batch_size=1)
     return model, loader, runtime_dtype
 

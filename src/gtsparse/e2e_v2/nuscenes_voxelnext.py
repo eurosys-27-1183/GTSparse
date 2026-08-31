@@ -1096,6 +1096,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--timing-repeats", type=int, default=5)
     parser.add_argument("--timing-warmup-repeats", type=int, default=2)
     parser.add_argument("--frames", type=int, default=0)
+    parser.add_argument("--random-sample", action="store_true")
     parser.add_argument("--sweeps", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda:0")
     parser.add_argument("--log-dir", type=Path, default=Path("logs"))
@@ -1127,7 +1128,12 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         model = model.half()
     model.eval()
     dataset = _make_nuscenes_dataset(config.data)
-    indices = _iter_sample_indices(dataset, frame_id=str(args.frame), num_samples=int(args.frames))
+    indices = _iter_sample_indices(
+        dataset,
+        frame_id=str(args.frame),
+        num_samples=int(args.frames),
+        random_sample=bool(getattr(args, "random_sample", False)),
+    )
     loader = _make_loader(dataset, indices, config.data, batch_size=int(args.batch))
     warmup_batches = min(int(args.warmup), len(loader))
     log_dir = _log_dir_for_run(root_log_dir=Path(getattr(args, "log_dir", Path("logs"))), device=str(args.device), model=model, data_root=config.data.root, sweeps=int(config.data.max_sweeps))
@@ -1154,6 +1160,7 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             "min_template": min_template,
             "nms_thresh": float(args.nms_thresh),
             "post_maxsize": int(args.post_maxsize),
+            "random_sample": bool(getattr(args, "random_sample", False)),
             "score_thresh": float(args.score_thresh),
             "spconv_do_sort": True,
             "split": str(args.split),
@@ -1194,6 +1201,7 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             "frames_logged": int(len(results)),
             "gpu": gpu_name,
             "min_template": min_template,
+            "random_sample": bool(getattr(args, "random_sample", False)),
             "split": str(args.split),
             "spconv_do_sort": True,
             "sweeps": int(config.data.max_sweeps),

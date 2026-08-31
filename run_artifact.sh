@@ -116,6 +116,7 @@ if [[ "$run_microbenchmark" == 1 ]]; then
     marker="logs/microbenchmark/timing/logs_${gpu_key}_${dtype_label}_voxelnext_nuscenes_sweeps1/${backend}.summary.json"
     run_experiment "$marker" "$micro_frames" python -m gtsparse.e2e_v2.nuscenes_voxelnext --backend "$backend" --dtype "$run_dtype" \
       --data-root dataset/nuscenes --split test --sweeps 1 --frames "$micro_frames" \
+      --random-sample \
       --warmup "$warmup" --timing-repeats "$timing_repeats" --timing-warmup-repeats "$timing_warmup" \
       --device "$device" --log-dir logs/microbenchmark/timing
   done

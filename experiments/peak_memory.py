@@ -26,7 +26,14 @@ def main() -> None:
     device = torch.device(args.device)
     torch.cuda.set_device(device)
     torch.cuda.reset_peak_memory_stats(device)
-    model, loader, runtime_dtype = build_workload(args.workload, args.backend, dtype, args.frames, args.device)
+    model, loader, runtime_dtype = build_workload(
+        args.workload,
+        args.backend,
+        dtype,
+        args.frames,
+        args.device,
+        random_sample=True,
+    )
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):

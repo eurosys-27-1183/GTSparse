@@ -44,7 +44,14 @@ def main() -> None:
     global capture
     args = parse_args()
     spconv_ops.implicit_gemm = implicit_gemm
-    model, loader, dtype = build_workload(args.workload, "spconv", "fp16", args.frames, args.device)
+    model, loader, dtype = build_workload(
+        args.workload,
+        "spconv",
+        "fp16",
+        args.frames,
+        args.device,
+        random_sample=True,
+    )
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
