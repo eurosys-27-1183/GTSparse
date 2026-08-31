@@ -14,17 +14,18 @@ grid = torch.cartesian_prod(
     torch.arange(1), torch.arange(1, 7), torch.arange(1, 7), torch.arange(1, 7)
 ).to(torch.int32)
 coords = grid[torch.randperm(grid.size(0))[:96]].contiguous().cuda()
-features = torch.randn(96, 16, device="cuda")
+channels = 64
+features = torch.randn(96, channels, device="cuda")
 
 for dtype, atol, rtol in (
     (torch.float32, 1e-3, 1e-3),
     (torch.float16, 2e-2, 2e-2),
 ):
-    conv = GeometricTemplateSubMConv3d(16, 16, 3, padding=1).cuda().to(dtype)
+    conv = GeometricTemplateSubMConv3d(channels, channels, 3, padding=1).cuda().to(dtype)
     sparse = GTSparseSparseConvTensor(features.to(dtype), coords, (8, 8, 8), 1)
     with torch.no_grad():
         actual = conv(sparse)
-        weight = conv.weight.view(3, 3, 3, 16, 16).permute(4, 3, 0, 1, 2).contiguous()
+        weight = conv.weight.view(3, 3, 3, channels, channels).permute(4, 3, 0, 1, 2).contiguous()
         expected = reference_subm_conv3d(sparse, weight, None, padding=1)
     torch.testing.assert_close(actual.features, expected.features, atol=atol, rtol=rtol)
     error = (actual.features - expected.features).abs().max().item()
