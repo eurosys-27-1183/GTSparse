@@ -43,16 +43,43 @@ Run the activation script before building or evaluating in a new shell:
 
 ```bash
 source scripts/activate.sh
-python scripts/smoke_test.py
+python scripts/validate_install.py
 ```
 
 ## Evaluation
 
-Run evaluation:
-```bash
-bash run_e2e_v2.sh [backend] [dtype]
-```
- + Choices of [backend]: gtsparse, spconv, torchsparse, minkowski.
- + Choices of [dtype]: fp32, fp16. 
+The artifact exposes one experiment entry point:
 
-Results are saved in `logs/` directory. Note that minkowski backend does not support fp16.
+```bash
+bash run_artifact.sh --end-to-end fp16
+bash run_artifact.sh --end-to-end fp32
+bash run_artifact.sh --microbenchmark
+bash run_artifact.sh --ablation
+bash run_artifact.sh --sensitivity
+```
+
+The FP16 end-to-end experiment runs GTSparse, SpConv, and TorchSparse++ in FP16 and MinkowskiEngine in FP32. The FP32 experiment runs all four systems in FP32. SpConv uses its default sorted bitmask path, TorchSparse++ and GTSparse run without sorting, and TF32 is disabled. End-to-end evaluation covers SECOND/KITTI, VoxelNeXt/nuScenes with 1 and 10 sweeps, and MinkUNet42/SemanticKITTI. Detection workloads report sparse-convolution latency and MinkUNet42 reports end-to-end latency.
+
+The microbenchmark experiment produces template-family distributions, effective-throughput data, builder/kernel breakdowns, and peak allocated GPU memory. Useful work and issued work are reconstructed from per-layer runtime data; SpConv's issued work uses the M-tile width returned by its autotuned kernel for each layer. GTSparse breakdown uses native builder/kernel CUDA events, while baseline breakdown uses one cold-to-warm pair per independent frame. Aggregation converts these raw component times to shares and scales them by the matching main E2E latency, so the displayed builder and kernel values sum to the latency reported in the main experiment. Peak memory reports `torch.cuda.max_memory_allocated` from model construction through the measured forwards, with each backend run in a separate process. Ablation evaluates `min_template=0,1,4,7` on VoxelNeXt with 10 sweeps. Sensitivity evaluates all systems with 1, 5, 10, and 20 sweeps.
+
+The current GTSparse MinkUNet42 path still uses baseline implementations for unsupported operators. The artifact reports this directly measured hybrid latency and does not apply the historical 25.9% plotting correction.
+
+Run every experiment and generate all tables and figures with:
+
+```bash
+bash run_artifact.sh --all
+```
+
+The end-to-end, ablation, and sensitivity experiments use the complete dataset split by default. `--frames N` selects the first `N` measured frames without changing the experiment path. Template, throughput, and time-breakdown measurements use 100 frames by default and accept `--micro-frames N`; peak-memory measurement uses 20 frames and accepts `--memory-frames N`. Timing defaults to 20 global warmup frames, two local warmup repetitions, and the median of three measured repetitions.
+
+Raw measurements are written under `logs/`. `results/` contains CSV tables aggregated from those logs, and `figures/` contains plots generated only from the CSV tables. Reprocess existing logs without running GPU experiments with:
+
+```bash
+bash run_artifact.sh --plots
+```
+
+Every GPU measurement displays a per-frame tqdm progress bar with the known total, percentage, and ETA. Completed results are reused by default: fixed-frame outputs must contain the requested number of records, while a full-split run is reusable only after its summary has been written at the end of the split. The runner prints each reused summary or JSONL path with a `[reuse]` prefix. Force every selected experiment to overwrite existing logs with:
+
+```bash
+bash run_artifact.sh --all --overwrite
+```

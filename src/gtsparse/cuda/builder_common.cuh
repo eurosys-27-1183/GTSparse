@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdlib>
 #include <ATen/cuda/CUDAContext.h>
 #include <cub/cub.cuh>
 #include <c10/cuda/CUDAGuard.h>
@@ -61,9 +62,10 @@ static __device__ __constant__ int kTemplatePayloadActualOffsetConst[kNumTemplat
     {0, 9, 18, 3, 12, 21, 6, 15, 24, 1, 10, 19, 4, 22, 7, 16, 25, 2, 11, 20, 5, 14, 23, 8, 17, 26, 13},
 };
 
-__device__ __forceinline__ int classify_template_fast(uint32_t active_mask) {
+__device__ __forceinline__ int classify_template_fast(uint32_t active_mask, int min_template_id = 0) {
     #pragma unroll
     for (int template_id = 0; template_id < kNumTemplates; ++template_id) {
+        if (template_id < min_template_id) continue;
         if ((active_mask & kTemplateRejectMaskActualConst[template_id]) == 0u) {
             return template_id;
         }
@@ -284,7 +286,8 @@ static __global__ void build_runtime_from_dense_out_in_map_kernel(
     int* __restrict__ input_rows_w18,
     int* __restrict__ input_rows_w27,
     int n_out,
-    int template_stride) {
+    int template_stride,
+    int min_template_id) {
     const int warp_id = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
     const int row = blockIdx.x * kBuilderWarpsPerBlock + warp_id;
@@ -319,7 +322,7 @@ static __global__ void build_runtime_from_dense_out_in_map_kernel(
     if (lane == 0) {
         const unsigned int classify_mask =
             dense_masks != nullptr ? static_cast<unsigned int>(row_mask) : active_mask;
-        template_id = classify_template_fast(classify_mask);
+        template_id = classify_template_fast(classify_mask, min_template_id);
         row_pos = atomicAdd(template_counts + template_id, 1);
     }
     template_id = __shfl_sync(0xffffffffu, template_id, 0);
@@ -739,6 +742,8 @@ build_runtime_from_dense_out_in_map(
     auto input_rows_w27 = torch::empty({kFamilyW27Templates, template_stride, kPayloadWidthW27}, int_opts);
 
     const dim3 gd((n_out + kBuilderWarpsPerBlock - 1) / kBuilderWarpsPerBlock);
+    const char* env_min_t = std::getenv("GTSPARSE_MIN_TEMPLATE");
+    const int min_template_id = env_min_t ? std::atoi(env_min_t) : 0;
     build_runtime_from_dense_out_in_map_kernel<<<gd, kBuilderThreads, 0, stream>>>(
         dense_out_in_map.data_ptr<int>(),
         dense_masks.defined() ? dense_masks.data_ptr<int>() : nullptr,
@@ -749,7 +754,8 @@ build_runtime_from_dense_out_in_map(
         input_rows_w18.data_ptr<int>(),
         input_rows_w27.data_ptr<int>(),
         n_out,
-        template_stride);
+        template_stride,
+        min_template_id);
     if (sorted) {
         sort_runtime_rows_by_local_mask_(
             template_counts,

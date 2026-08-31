@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import statistics
+
 import torch
 
 
@@ -18,5 +20,5 @@ def measure_cuda_elapsed_ms(fn, *args, device: torch.device, repeats: int = 1, w
         end.record()
         event_pairs.append((start, end))
     torch.cuda.synchronize(device=device)
-    times = sorted(float(start.elapsed_time(end)) for start, end in event_pairs)
-    return out, times[len(times) // 2]
+    times = [float(start.elapsed_time(end)) for start, end in event_pairs]
+    return out, float(statistics.median(times))

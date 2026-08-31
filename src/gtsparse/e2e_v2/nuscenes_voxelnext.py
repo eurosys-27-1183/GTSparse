@@ -5,8 +5,8 @@ from __future__ import annotations
 import argparse
 from functools import reduce
 from dataclasses import dataclass, field
-from datetime import datetime
 import json
+import os
 from pathlib import Path
 from typing import Any, Sequence
 
@@ -1023,6 +1023,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--post-maxsize", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--timing-repeats", type=int, default=5)
+    parser.add_argument("--timing-warmup-repeats", type=int, default=2)
     parser.add_argument("--frames", type=int, default=0)
     parser.add_argument("--sweeps", type=int, default=10)
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -1062,7 +1063,10 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     log_path = log_dir / f"{args.backend}.jsonl"
     config_path = log_dir / f"{args.backend}.config.json"
     summary_path = log_dir / f"{args.backend}.summary.json"
-    run_begin = datetime.now().isoformat(timespec="seconds")
+    device_index = torch.device(args.device).index
+    gpu_name = torch.cuda.get_device_name(torch.cuda.current_device() if device_index is None else device_index)
+    workload = f"voxelnext_nuscenes_sweeps{int(config.data.max_sweeps)}"
+    min_template = int(os.environ.get("GTSPARSE_MIN_TEMPLATE", "0"))
     _write_json_file(
         config_path,
         {
@@ -1074,18 +1078,21 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             "sorted": bool(getattr(args, "sorted", False)),
             "frame": str(args.frame),
             "frames": int(args.frames),
+            "gpu": gpu_name,
             "log_dir": str(log_dir),
+            "min_template": min_template,
             "nms_thresh": float(args.nms_thresh),
             "post_maxsize": int(args.post_maxsize),
-            "run_begin": run_begin,
             "score_thresh": float(args.score_thresh),
+            "spconv_do_sort": True,
             "split": str(args.split),
             "sweeps": int(config.data.max_sweeps),
-            "timing_repeats": 3,
-            "timing_warmup_repeats": 2,
+            "timing_repeats": int(max(1, args.timing_repeats)),
+            "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
             "topk": int(args.topk),
             "torchsparse_hash_rsv_ratio": torchsparse_hash_rsv_ratio,
             "warmup": int(args.warmup),
+            "workload": workload,
         },
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1096,10 +1103,12 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             device=str(args.device),
             warmup=warmup_batches,
             timing_repeats=int(args.timing_repeats),
+            timing_warmup_repeats=int(args.timing_warmup_repeats),
             topk=int(args.topk),
             score_thresh=float(args.score_thresh),
             nms_thresh=float(args.nms_thresh),
             post_maxsize=int(args.post_maxsize),
+            progress_desc=f"voxelnext/nuscenes/sw{int(config.data.max_sweeps)}/{args.backend}",
             on_result=lambda record: _append_backend_log_frame(log_file, record),
         )
     conv_only_times = [float(record["conv_only_ms"]) for record in results]
@@ -1109,34 +1118,41 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         {
             "backend": str(args.backend),
             "batch": int(args.batch),
+            "data_root": str(config.data.root),
+            "dtype": str(args.dtype),
             "frames_logged": int(len(results)),
-            "run_begin": run_begin,
-            "run_end": datetime.now().isoformat(timespec="seconds"),
+            "gpu": gpu_name,
+            "min_template": min_template,
             "split": str(args.split),
+            "spconv_do_sort": True,
             "sweeps": int(config.data.max_sweeps),
             "stats": {"conv_only": _stats_dict(conv_only_times), "end2end": _stats_dict(end2end_times)},
-            "timing_repeats": 3,
-            "timing_warmup_repeats": 2,
+            "timing_repeats": int(max(1, args.timing_repeats)),
+            "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
             "torchsparse_hash_rsv_ratio": torchsparse_hash_rsv_ratio,
             "warmup_batches": int(warmup_batches),
+            "workload": workload,
         },
     )
     summary = {
         "backend": str(args.backend),
         "dtype": str(args.dtype),
         "device": str(args.device),
+        "gpu": gpu_name,
         "data_root": str(config.data.root),
         "split": str(args.split),
         "sweeps": int(config.data.max_sweeps),
         "frames": int(len(indices)),
         "batch": int(args.batch),
-        "timing_repeats": 3,
-        "timing_warmup_repeats": 2,
+        "timing_repeats": int(max(1, args.timing_repeats)),
+        "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
         "torchsparse_hash_rsv_ratio": torchsparse_hash_rsv_ratio,
         "log_dir": str(log_dir),
+        "min_template": min_template,
         "log_jsonl": str(log_path),
         "config_json": str(config_path),
         "summary_json": str(summary_path),
+        "workload": workload,
         "results": results,
     }
     if args.json_out is not None:

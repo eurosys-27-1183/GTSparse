@@ -61,4 +61,4 @@ python -c 'import torchsparse'
 python -c 'import MinkowskiEngine'
 
 BUILD_MODE=production python -m pip install --no-build-isolation -e .
-python scripts/smoke_test.py
+python scripts/validate_install.py

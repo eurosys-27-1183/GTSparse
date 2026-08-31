@@ -11,6 +11,8 @@
 dataset
 dataset/
 logs/
+results/
+figures/
 paper
 paper/
 ActiMM/

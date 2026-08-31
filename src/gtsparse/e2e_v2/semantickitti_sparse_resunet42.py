@@ -5,7 +5,6 @@ from __future__ import annotations
 import argparse
 from collections import OrderedDict
 from dataclasses import dataclass, field
-from datetime import datetime
 import importlib
 import json
 from pathlib import Path
@@ -15,6 +14,7 @@ import numpy as np
 import torch
 import torch.nn as nn
 import torch.utils.data as torch_data
+from tqdm.auto import tqdm
 
 import torchsparse
 
@@ -1112,20 +1112,24 @@ def _measure_frame_timings(
     runtime_dtype = next(model.parameters()).dtype
     from .kitti_second import _iter_device_batches, measure_cuda_elapsed_ms
 
-    device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
+    warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     with torch.no_grad():
         for _ in range(max(0, int(warmup))):
-            batch = next(device_batches, None)
+            batch = next(warmup_device_batches, None)
             if batch is None:
-                return []
+                break
             voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
             model.forward_sparse_backbone(voxel_features, voxel_coords, batch_size)
             model(batch)
         torch.cuda.synchronize(device=resolved_device)
     results = []
-    from .kitti_second import _tqdm
-
-    measured_batches = _tqdm(device_batches, desc="semantickitti_minkunet", dynamic_ncols=True) if _tqdm is not None else device_batches
+    device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
+    measured_batches = tqdm(
+        device_batches,
+        total=len(loader),
+        desc=f"minkunet/semantickitti/{model.backend}",
+        dynamic_ncols=True,
+    )
     with torch.no_grad():
         for batch_index, batch in enumerate(measured_batches):
             predictions, end2end_ms = measure_cuda_elapsed_ms(
@@ -1200,7 +1204,9 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     log_path = log_dir / f"{args.backend}.jsonl"
     config_path = log_dir / f"{args.backend}.config.json"
     summary_path = log_dir / f"{args.backend}.summary.json"
-    run_begin = datetime.now().isoformat(timespec="seconds")
+    device_index = torch.device(args.device).index
+    gpu_name = torch.cuda.get_device_name(torch.cuda.current_device() if device_index is None else device_index)
+    workload = "minkunet_semantickitti_sweeps1"
     _write_json_file(
         config_path,
         {
@@ -1213,13 +1219,14 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             "spconv_do_sort": not bool(getattr(args, "spconv_disable_sort", False)),
             "frame": str(args.frame),
             "frames": int(args.frames),
+            "gpu": gpu_name,
             "log_dir": str(log_dir),
-            "run_begin": run_begin,
             "split": str(args.split),
             "sweeps": int(config.data.max_sweeps),
             "timing_repeats": int(max(1, args.timing_repeats)),
             "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
             "warmup": int(args.warmup),
+            "workload": workload,
         },
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1239,9 +1246,10 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         {
             "backend": str(args.backend),
             "batch": int(args.batch),
+            "data_root": str(config.data.root),
+            "dtype": str(args.dtype),
             "frames_logged": int(len(results)),
-            "run_begin": run_begin,
-            "run_end": datetime.now().isoformat(timespec="seconds"),
+            "gpu": gpu_name,
             "split": str(args.split),
             "spconv_do_sort": not bool(getattr(args, "spconv_disable_sort", False)),
             "sweeps": int(config.data.max_sweeps),
@@ -1249,12 +1257,14 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             "timing_repeats": int(max(1, args.timing_repeats)),
             "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
             "warmup_batches": int(warmup_batches),
+            "workload": workload,
         },
     )
     summary = {
         "backend": str(args.backend),
         "dtype": str(args.dtype),
         "device": str(args.device),
+        "gpu": gpu_name,
         "data_root": str(config.data.root),
         "split": str(args.split),
         "spconv_do_sort": not bool(getattr(args, "spconv_disable_sort", False)),
@@ -1267,6 +1277,7 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         "log_jsonl": str(log_path),
         "config_json": str(config_path),
         "summary_json": str(summary_path),
+        "workload": workload,
         "results": results,
     }
     if args.json_out is not None:

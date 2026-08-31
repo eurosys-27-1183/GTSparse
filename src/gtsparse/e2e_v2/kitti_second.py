@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import argparse
-from datetime import datetime
 from dataclasses import asdict, dataclass, field
 import json
 import math
@@ -16,16 +15,13 @@ import torch
 import torch.nn as nn
 import torch.utils.data as torch_data
 import torchvision.ops
+from tqdm.auto import tqdm
 
 import torchsparse
 
 torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 torchsparse.backends.allow_tf32 = False
-try:
-    from tqdm.auto import tqdm as _tqdm
-except ImportError:  # pragma: no cover
-    _tqdm = None
 
 from .common import measure_cuda_elapsed_ms, require_cuda_device, resolve_runtime_dtype
 from gtsparse.sparse3d.geometric_template import (
@@ -1463,6 +1459,7 @@ def _parse_args() -> argparse.Namespace:
     parser.add_argument("--post-maxsize", type=int, default=100)
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--timing-repeats", type=int, default=5)
+    parser.add_argument("--timing-warmup-repeats", type=int, default=2)
     parser.add_argument("--frames", type=int, default=0)
     parser.add_argument("--sweeps", type=int, default=1)
     parser.add_argument("--device", type=str, default="cuda:0")
@@ -1520,30 +1517,33 @@ def _measure_frame_timings(
     device: str,
     warmup: int,
     timing_repeats: int,
+    timing_warmup_repeats: int,
     topk: int,
     score_thresh: float,
     nms_thresh: float,
     post_maxsize: int,
+    progress_desc: str = "sparse_inference",
     on_result=None,
 ):
-    local_measure_warmup_repeats = 2
-    local_measure_repeats = 3
+    local_measure_warmup_repeats = max(0, int(timing_warmup_repeats))
+    local_measure_repeats = max(1, int(timing_repeats))
     resolved_device = require_cuda_device(device)
     runtime_dtype = next(model.parameters()).dtype
-    device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     conv_only_fn = _resolve_conv_only_fn(model)
+    warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     with torch.no_grad():
         for _ in range(max(0, int(warmup))):
-            batch = next(device_batches, None)
+            batch = next(warmup_device_batches, None)
             if batch is None:
-                return []
+                break
             voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
             conv_only_fn(voxel_features, voxel_coords, batch_size)
             model(batch)
         torch.cuda.synchronize(device=resolved_device)
 
     results = []
-    measured_batches = _tqdm(device_batches, desc="kitti_second", dynamic_ncols=True) if _tqdm is not None else device_batches
+    device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
+    measured_batches = tqdm(device_batches, total=len(loader), desc=progress_desc, dynamic_ncols=True)
     with torch.no_grad():
         for batch_index, batch in enumerate(measured_batches):
             voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
@@ -1632,6 +1632,7 @@ def _append_backend_log_frame(log_file, record: dict[str, object]) -> None:
         "conv_only_ms": float(record["conv_only_ms"]),
         "end2end_ms": float(record["end2end_ms"]),
         "timing_repeats": int(record.get("timing_repeats", 1)),
+        "timing_warmup_repeats": int(record.get("timing_warmup_repeats", 0)),
     }
     json.dump(payload, log_file, ensure_ascii=True, sort_keys=True)
     log_file.write("\n")
@@ -1642,10 +1643,9 @@ def _stats_dict(values: list[float]) -> dict[str, float | int] | None:
     finite_values = [float(v) for v in values if math.isfinite(float(v))]
     if not finite_values:
         return None
-    values_sorted = sorted(finite_values)
     return {
         "count": int(len(finite_values)),
-        "median_ms": float(values_sorted[len(values_sorted) // 2]),
+        "median_ms": float(statistics.median(finite_values)),
         "mean_ms": float(statistics.mean(finite_values)),
         "min_ms": float(min(finite_values)),
         "max_ms": float(max(finite_values)),
@@ -1702,7 +1702,8 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
     log_path = log_dir / f"{args.backend}.jsonl"
     config_path = log_dir / f"{args.backend}.config.json"
     summary_path = log_dir / f"{args.backend}.summary.json"
-    run_begin = datetime.now().isoformat(timespec="seconds")
+    gpu_name = torch.cuda.get_device_name(_device_index(str(args.device)))
+    workload = "second_kitti_sweeps1"
     _write_json_file(
         config_path,
         {
@@ -1715,18 +1716,20 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             "sorted": bool(getattr(args, "sorted", False)),
             "frame": str(args.frame),
             "frames": int(args.frames),
+            "gpu": gpu_name,
             "log_dir": str(log_dir),
             "nms_thresh": float(args.nms_thresh),
             "post_maxsize": int(args.post_maxsize),
-            "run_begin": run_begin,
             "score_thresh": float(args.score_thresh),
+            "spconv_do_sort": True,
             "split": str(args.split),
             "strict_ckpt": bool(args.strict_ckpt),
             "sweeps": int(config.data.max_sweeps),
-            "timing_repeats": 3,
-            "timing_warmup_repeats": 2,
+            "timing_repeats": int(max(1, args.timing_repeats)),
+            "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
             "topk": int(args.topk),
             "warmup": int(args.warmup),
+            "workload": workload,
         },
     )
     log_path.parent.mkdir(parents=True, exist_ok=True)
@@ -1737,10 +1740,12 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
             device=str(args.device),
             warmup=warmup_batches,
             timing_repeats=int(args.timing_repeats),
+            timing_warmup_repeats=int(args.timing_warmup_repeats),
             topk=int(args.topk),
             score_thresh=float(args.score_thresh),
             nms_thresh=float(args.nms_thresh),
             post_maxsize=int(args.post_maxsize),
+            progress_desc=f"second/kitti/{args.backend}",
             on_result=lambda record: _append_backend_log_frame(log_file, record),
         )
     conv_only_times = [float(record["conv_only_ms"]) for record in results]
@@ -1750,19 +1755,21 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         "backend": str(args.backend),
         "dtype": str(args.dtype),
         "device": str(args.device),
+        "gpu": gpu_name,
         "data_root": str(config.data.root),
         "split": str(args.split),
         "sweeps": int(config.data.max_sweeps),
         "frames_requested": int(len(indices)),
         "frames": int(len(results)),
         "warmup_batches": int(warmup_batches),
-        "timing_repeats": 3,
-        "timing_warmup_repeats": 2,
+        "timing_repeats": int(max(1, args.timing_repeats)),
+        "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
         "batch": int(args.batch),
         "log_dir": str(log_dir),
         "log_jsonl": str(log_path),
         "config_json": str(config_path),
         "summary_json": str(summary_path),
+        "workload": workload,
         "results": results,
     }
     if checkpoint_report is not None:
@@ -1776,18 +1783,21 @@ def run_cli(args: argparse.Namespace) -> dict[str, object]:
         {
             "backend": str(args.backend),
             "batch": int(args.batch),
+            "data_root": str(config.data.root),
+            "dtype": str(args.dtype),
             "frames_logged": int(len(results)),
-            "run_begin": run_begin,
-            "run_end": datetime.now().isoformat(timespec="seconds"),
+            "gpu": gpu_name,
             "split": str(args.split),
+            "spconv_do_sort": True,
             "sweeps": int(config.data.max_sweeps),
             "stats": {
                 "conv_only": _stats_dict(conv_only_times),
                 "end2end": _stats_dict(end2end_times),
             },
-            "timing_repeats": 3,
-            "timing_warmup_repeats": 2,
+            "timing_repeats": int(max(1, args.timing_repeats)),
+            "timing_warmup_repeats": int(max(0, args.timing_warmup_repeats)),
             "warmup_batches": int(warmup_batches),
+            "workload": workload,
         },
     )
     if args.json_out is not None:

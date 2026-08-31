@@ -1,5 +1,6 @@
 #include "api.h"
 
+#include <cstdlib>
 #include <cub/cub.cuh>
 #include <pybind11/pybind11.h>
 
@@ -110,7 +111,8 @@ static __global__ void build_full_runtime_kernel(
     int dil_d,
     int dil_h,
     int dil_w,
-    int template_stride) {
+    int template_stride,
+    int min_template_id) {
     const int warp_id = threadIdx.x >> 5;
     const int lane = threadIdx.x & 31;
     const int row = blockIdx.x * kBuilderWarpsPerBlock + warp_id;
@@ -160,7 +162,7 @@ static __global__ void build_full_runtime_kernel(
     int template_id = -1;
     int row_pos = -1;
     if (lane == 0) {
-        template_id = classify_template_fast(active_mask);
+        template_id = classify_template_fast(active_mask, min_template_id);
         row_pos = atomicAdd(template_counts + template_id, 1);
     }
     template_id = __shfl_sync(0xffffffffu, template_id, 0);
@@ -402,6 +404,8 @@ build_finalize_row_template_center_last_full_runtime_from_coords(
     }
 
     const dim3 gd((n_out + kBuilderWarpsPerBlock - 1) / kBuilderWarpsPerBlock);
+    const char* env_min_t = std::getenv("GTSPARSE_MIN_TEMPLATE");
+    const int min_template_id = env_min_t ? std::atoi(env_min_t) : 0;
     build_full_runtime_kernel<<<gd, kBuilderThreads, 0, stream>>>(
         unique_keys.data_ptr<int64_t>(),
         map,
@@ -427,7 +431,8 @@ build_finalize_row_template_center_last_full_runtime_from_coords(
         dil_d,
         dil_h,
         dil_w,
-        template_stride);
+        template_stride,
+        min_template_id);
     if (sorted) {
         sort_runtime_rows_by_local_mask_(
             template_counts,
