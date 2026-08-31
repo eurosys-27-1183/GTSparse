@@ -1,4 +1,4 @@
-# GTSparse: A Geomtric-Template-Driven Sparse Convolution Runtime on GPUs
+# GTSparse: A Geometric-Template-Driven Sparse Convolution Runtime on GPUs
 
 ## Artifact Evaluation
 
@@ -61,8 +61,6 @@ bash run_artifact.sh --sensitivity
 The FP16 end-to-end experiment runs GTSparse, SpConv, and TorchSparse++ in FP16 and MinkowskiEngine in FP32. The FP32 experiment runs all four systems in FP32. SpConv uses its default sorted bitmask path, TorchSparse++ and GTSparse run without sorting, and TF32 is disabled. End-to-end evaluation covers SECOND/KITTI, VoxelNeXt/nuScenes with 1 and 10 sweeps, and MinkUNet42/SemanticKITTI. Detection workloads report sparse-convolution latency and MinkUNet42 reports end-to-end latency.
 
 The microbenchmark experiment produces template-family distributions, effective-throughput data, builder/kernel breakdowns, and peak allocated GPU memory. Useful work and issued work are reconstructed from per-layer runtime data; SpConv's issued work uses the M-tile width returned by its autotuned kernel for each layer. GTSparse breakdown uses native builder/kernel CUDA events, while baseline breakdown uses one cold-to-warm pair per independent frame. Aggregation converts these raw component times to shares and scales them by the matching main E2E latency, so the displayed builder and kernel values sum to the latency reported in the main experiment. Peak memory reports `torch.cuda.max_memory_allocated` from model construction through the measured forwards, with each backend run in a separate process. Ablation evaluates `min_template=0,1,4,7` on VoxelNeXt with 10 sweeps. Sensitivity evaluates all systems with 1, 5, 10, and 20 sweeps.
-
-The current GTSparse MinkUNet42 path still uses baseline implementations for unsupported operators. The artifact reports this directly measured hybrid latency and does not apply the historical 25.9% plotting correction.
 
 Run every experiment and generate all tables and figures with:
 
