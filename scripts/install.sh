@@ -40,13 +40,13 @@ unset CUMM_CUDA_VERSION
   cd third_parties/cumm
   python -m pip install -e .
 )
-python -c 'import cumm'
+CUMM_DISABLE_JIT=0 python -c 'import cumm'
 
 (
   cd third_parties/spconv
   python -m pip install --no-build-isolation -e .
 )
-python -c 'import spconv.pytorch'
+CUMM_DISABLE_JIT=1 SPCONV_DISABLE_JIT=0 python -c 'import spconv.pytorch'
 
 (
   cd third_parties/torchsparse

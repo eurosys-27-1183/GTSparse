@@ -19,3 +19,5 @@ export CUDA_PATH="$CUDA_HOME"
 export PATH="$CUDA_HOME/bin:$PATH"
 export LD_LIBRARY_PATH="$CUDA_HOME/lib64${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 export CPATH="$gtsparse_root/.venv/include${CPATH:+:$CPATH}"
+export CUMM_DISABLE_JIT=1
+export SPCONV_DISABLE_JIT=1
