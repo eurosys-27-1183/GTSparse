@@ -113,7 +113,7 @@ def plot_template_distribution(rows, figures: Path) -> None:
         len(rows),
         2,
         7.2,
-        "3×3×3 template assignment distribution (% of output voxels in K=27 layers).\nAvg Width is the output-row-weighted assigned template width in offsets.",
+        "Template assignment distribution (% of output voxels per family) for 3×3×3 (K=27) layers.\nAvg Width is measured in offsets over the same K=27 output rows.",
     )
     top = len(rows) + 2
     table_rule(axis, top, edges[0], edges[-1], 1.2)
@@ -195,7 +195,7 @@ def plot_time_breakdown(rows, figures: Path) -> None:
         len(rows),
         1,
         6.4,
-        "Builder/kernel latency breakdown (ms). Component shares come from the breakdown runs\nand are scaled so Builder + Kernel equals the corresponding main E2E latency.",
+        "Time breakdown (ms) on NVIDIA GeForce RTX 3080 (FP16; Minkowski in FP32).\nBuilder measures runtime construction; Kernel measures sparse convolution execution.",
     )
     table_rule(axis, len(rows) + 1, edges[0], edges[-1], 1.2)
     table_rule(axis, len(rows), edges[0], edges[-1], 0.8)

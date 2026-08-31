@@ -124,6 +124,18 @@ if [[ "$run_microbenchmark" == 1 ]]; then
     run_experiment "logs/microbenchmark/profile/${workload}.jsonl" "$micro_frames" python -m experiments.profile_workload --workload "$workload" --frames "$micro_frames" \
       --warmup "$warmup" --device "$device" --out "logs/microbenchmark/profile/${workload}.jsonl"
   done
+  for workload in second_kitti_sweeps1 voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10 minkunet_semantickitti_sweeps1; do
+    profile_frames="$frames"
+    if [[ "$profile_frames" == 0 ]]; then
+      case "$workload" in
+        second_kitti_sweeps1) profile_frames=7518 ;;
+        voxelnext_nuscenes_sweeps1|voxelnext_nuscenes_sweeps10) profile_frames=6008 ;;
+        minkunet_semantickitti_sweeps1) profile_frames=4071 ;;
+      esac
+    fi
+    run_experiment "logs/microbenchmark/template_profile/${workload}.jsonl" "$profile_frames" python -m experiments.profile_templates --workload "$workload" --frames "$frames" \
+      --warmup "$warmup" --device "$device" --out "logs/microbenchmark/template_profile/${workload}.jsonl"
+  done
   run_experiment logs/microbenchmark/profile_spconv/voxelnext_nuscenes_sweeps1.jsonl "$micro_frames" python -m experiments.profile_spconv --workload voxelnext_nuscenes_sweeps1 --frames "$micro_frames" \
     --warmup "$warmup" --device "$device" --out logs/microbenchmark/profile_spconv/voxelnext_nuscenes_sweeps1.jsonl
 

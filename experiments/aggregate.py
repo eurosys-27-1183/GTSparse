@@ -72,8 +72,15 @@ def profile_rows(root: Path):
         records = read_jsonl(path)
         if not records:
             continue
-        counts = [sum(record["kernel27_family_counts"][index] for record in records) for index in range(4)]
+        raw_by_key[(records[0]["gpu"], records[0]["workload"])] = records
+    for path in sorted((root / "microbenchmark" / "template_profile").glob("*.jsonl")):
+        records = read_jsonl(path)
+        if not records:
+            continue
+        counts = [sum(record["family_counts"][index] for record in records) for index in range(4)]
         total = sum(counts)
+        if total == 0:
+            raise ValueError(f"template profile contains no K=27 rows: {path}")
         widths = (1, 10, 19, 27)
         row = {
             "avg_assigned_width": sum(count * width for count, width in zip(counts, widths)) / total,
@@ -81,13 +88,12 @@ def profile_rows(root: Path):
             "frames": len(records),
             "full27_percent": 100 * counts[3] / total,
             "gpu": records[0]["gpu"],
-            "kernel_size": "3x3x3",
+            "operator": "3x3x3",
             "skip1_percent": 100 * counts[2] / total,
             "skip2_percent": 100 * counts[1] / total,
             "workload": records[0]["workload"],
         }
         profiles.append(row)
-        raw_by_key[(row["gpu"], row["workload"])] = records
     spconv_by_key = {}
     for path in sorted((root / "microbenchmark" / "profile_spconv").glob("*.jsonl")):
         records = read_jsonl(path)
@@ -204,8 +210,9 @@ def breakdown_rows(root: Path, summaries):
             raise ValueError(f"missing latency scale target for {gpu} {workload} {backend} {dtype}")
         raw_builder = statistics.median(record["builder_ms"] for record in records)
         raw_kernel = statistics.median(record["kernel_ms"] for record in records)
-        raw_total = raw_builder + raw_kernel
-        builder_share = raw_builder / raw_total
+        builder_share = statistics.median(
+            record["builder_ms"] / record["total_ms"] for record in records
+        )
         target_ms = float(targets[-1]["median_ms"])
         rows.append(
             {
@@ -253,7 +260,7 @@ def main() -> None:
 
     write_csv(args.results / "latency.csv", ("experiment", "gpu", "dtype", "workload", "sweeps", "backend", "metric", "count", "median_ms", "mean_ms", "min_template"), summaries)
     write_csv(args.results / "per_frame_latency.csv", ("gpu", "dtype", "workload", "backend", "metric", "frame_index", "frame_id", "latency_ms"), per_frame)
-    write_csv(args.results / "template_distribution.csv", ("gpu", "workload", "kernel_size", "frames", "center_percent", "skip2_percent", "skip1_percent", "full27_percent", "avg_assigned_width"), profiles)
+    write_csv(args.results / "template_distribution.csv", ("gpu", "workload", "operator", "frames", "center_percent", "skip2_percent", "skip1_percent", "full27_percent", "avg_assigned_width"), profiles)
     write_csv(args.results / "effective_throughput.csv", ("gpu", "workload", "backend", "dtype", "raw_tflops", "effective_tflops", "proportionality_percent"), throughput)
     write_csv(
         args.results / "time_breakdown.csv",

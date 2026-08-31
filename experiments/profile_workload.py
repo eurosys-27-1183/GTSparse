@@ -14,11 +14,15 @@ from gtsparse.sparse3d.geometric_template import (
     GeometricTemplateKernel8Conv3d,
     GeometricTemplateKernel8InverseConv3d,
     GeometricTemplateKernel9Conv3d,
+    GeometricTemplateSparseConv3d,
+    GeometricTemplateSparseInverseConv3d,
+    GeometricTemplateSubMConv3d,
 )
 
 
 capture = False
 current_layers = []
+current_kernel27_kind = None
 original_conv = gt_ops._conv
 TORCHSPARSE_BM = 128
 
@@ -90,6 +94,7 @@ def observe_runtime(kind, features, logical_weight, runtime) -> None:
             "cout": cout,
             "effective_flops": active_pairs * flops_per_pair,
             "gtsparse_issued_flops": gtsparse_offset_rows * flops_per_pair,
+            "kernel_volume": 27,
             "kind": kind,
             "minkowski_issued_flops": active_pairs * flops_per_pair,
             "n_out": int(runtime.n_out),
@@ -154,7 +159,8 @@ def observe_special(kind, features, logical_weight, runtime, offsets) -> None:
         "active_pairs": active_pairs, "cin": cin, "cout": cout,
         "effective_flops": active_pairs * flops_per_pair,
         "gtsparse_issued_flops": issued_rows * flops_per_pair,
-        "kind": kind, "minkowski_issued_flops": active_pairs * flops_per_pair,
+        "kernel_volume": kernel_volume, "kind": kind,
+        "minkowski_issued_flops": active_pairs * flops_per_pair,
         "n_out": n_out, "padded_counts": padded_counts,
         "spconv_issued_flops_bm32": spconv_rows[32] * flops_per_pair,
         "spconv_issued_flops_bm64": spconv_rows[64] * flops_per_pair,
@@ -182,9 +188,26 @@ def special_hook(module, inputs, output):
         observe_special("kernel8_inverse", sparse_input.features, module._runtime_weight(), runtime, K8_OFFSETS)
 
 
+def kernel27_pre_hook(module, inputs):
+    global current_kernel27_kind
+    if isinstance(module, GeometricTemplateSubMConv3d):
+        current_kernel27_kind = "kernel27_subm"
+    elif isinstance(module, GeometricTemplateSparseConv3d):
+        current_kernel27_kind = "kernel27_regular"
+    else:
+        current_kernel27_kind = "kernel27_inverse"
+
+
+def kernel27_hook(module, inputs, output):
+    global current_kernel27_kind
+    current_kernel27_kind = None
+
+
 def observed_conv(features, logical_weight, runtime):
     if capture:
-        observe_runtime("native", features, logical_weight, runtime)
+        if current_kernel27_kind is None:
+            raise RuntimeError("K=27 convolution executed outside a profiled sparse module")
+        observe_runtime(current_kernel27_kind, features, logical_weight, runtime)
     return original_conv(features, logical_weight, runtime)
 
 
@@ -213,6 +236,14 @@ def main() -> None:
             GeometricTemplateKernel9Conv3d,
         ))
     ]
+    for module in model.modules():
+        if isinstance(module, (
+            GeometricTemplateSubMConv3d,
+            GeometricTemplateSparseConv3d,
+            GeometricTemplateSparseInverseConv3d,
+        )):
+            handles.append(module.register_forward_pre_hook(kernel27_pre_hook))
+            handles.append(module.register_forward_hook(kernel27_hook))
 
     with torch.no_grad():
         for batch_index, batch in enumerate(loader):
@@ -230,21 +261,11 @@ def main() -> None:
                 batch = move_batch(batch, args.device, dtype)
                 sparse_forward(model, batch, args.workload)
                 torch.cuda.synchronize(args.device)
-                kernel27_family_counts = [0, 0, 0, 0]
-                for layer in current_layers:
-                    if layer["kind"] != "native":
-                        continue
-                    counts = layer["template_counts"]
-                    kernel27_family_counts[0] += counts[0]
-                    kernel27_family_counts[1] += sum(counts[1:4])
-                    kernel27_family_counts[2] += sum(counts[4:7])
-                    kernel27_family_counts[3] += counts[7]
                 record = {
                     "effective_flops": sum(layer["effective_flops"] for layer in current_layers),
                     "frame_ids": list(batch.frame_ids),
                     "gpu": torch.cuda.get_device_name(torch.device(args.device)),
                     "gtsparse_issued_flops": sum(layer["gtsparse_issued_flops"] for layer in current_layers),
-                    "kernel27_family_counts": kernel27_family_counts,
                     "layers": current_layers,
                     "minkowski_issued_flops": sum(layer["minkowski_issued_flops"] for layer in current_layers),
                     "torchsparse_issued_flops": sum(layer["torchsparse_issued_flops"] for layer in current_layers),
