@@ -141,7 +141,14 @@ def parse_args():
 def main() -> None:
     args = parse_args()
     dtype = "fp32" if args.backend == "minkowski" else args.dtype
-    model, loader, runtime_dtype = build_workload(args.workload, args.backend, dtype, args.frames, args.device)
+    model, loader, runtime_dtype = build_workload(
+        args.workload,
+        args.backend,
+        dtype,
+        args.frames,
+        args.device,
+        random_sample=True,
+    )
     if args.backend == "gtsparse":
         enable_native_timing()
 

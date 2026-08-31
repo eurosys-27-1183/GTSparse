@@ -1,3 +1,4 @@
+import random
 from pathlib import Path
 
 import torch
@@ -11,7 +12,15 @@ WORKLOADS = (
 )
 
 
-def build_workload(workload: str, backend: str, dtype: str, frames: int, device: str):
+def build_workload(
+    workload: str,
+    backend: str,
+    dtype: str,
+    frames: int,
+    device: str,
+    *,
+    random_sample: bool = False,
+):
     from gtsparse.e2e_v2.kitti_second import _iter_sample_indices, _make_loader
 
     if workload == "second_kitti_sweeps1":
@@ -62,7 +71,10 @@ def build_workload(workload: str, backend: str, dtype: str, frames: int, device:
     if runtime_dtype == torch.float16:
         model = model.half()
     model.eval()
-    indices = _iter_sample_indices(dataset, frame_id="", num_samples=int(frames))
+    if random_sample and 0 < int(frames) < len(dataset):
+        indices = sorted(random.Random(0).sample(range(len(dataset)), int(frames)))
+    else:
+        indices = _iter_sample_indices(dataset, frame_id="", num_samples=int(frames))
     loader = _make_loader(dataset, indices, config.data, batch_size=1)
     return model, loader, runtime_dtype
 
