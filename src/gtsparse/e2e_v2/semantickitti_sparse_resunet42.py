@@ -23,7 +23,13 @@ torch.backends.cudnn.allow_tf32 = False
 torchsparse.backends.allow_tf32 = False
 
 from gtsparse.e2e_v2.common import require_cuda_device, resolve_runtime_dtype
-from gtsparse.sparse3d.geometric_template import GeometricTemplateSparseConv3d, GeometricTemplateSparseInverseConv3d, GeometricTemplateSubMConv3d
+from gtsparse.sparse3d.geometric_template import (
+    GeometricTemplateKernel8Conv3d,
+    GeometricTemplateKernel8InverseConv3d,
+    GeometricTemplateSparseConv3d,
+    GeometricTemplateSparseInverseConv3d,
+    GeometricTemplateSubMConv3d,
+)
 from gtsparse.sparse3d.sparse_tensor import GTSparseSparseConvTensor
 
 from .kitti_second import (
@@ -426,13 +432,9 @@ def _torchsparse_to_gtsparse(x) -> GTSparseSparseConvTensor:
 class _GTMinkUNetDownStage(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, *, blocks: int, sorted: bool = False) -> None:
         super().__init__()
-        import torchsparse.nn as spnn
-
-        self.down = nn.Sequential(
-            spnn.Conv3d(in_channels, out_channels, kernel_size=2, stride=2, generative=False),
-            spnn.BatchNorm(out_channels),
-            spnn.ReLU(True),
-        )
+        self.down = GeometricTemplateKernel8Conv3d(in_channels, out_channels)
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU(True)
         self.blocks = _make_gt_res_stack(
             in_channels=out_channels,
             out_channels=out_channels,
@@ -441,24 +443,17 @@ class _GTMinkUNetDownStage(nn.Module):
         )
 
     def forward(self, x: GTSparseSparseConvTensor) -> GTSparseSparseConvTensor:
-        x_ts = _gtsparse_to_torchsparse(x)
-        x_ts = self.down(x_ts)
-        x = _torchsparse_to_gtsparse(x_ts)
+        x = self.down(x)
+        x.replace_feature_(self.relu(self.bn(x.features)))
         return self.blocks(x)
 
 
 class _GTMinkUNetUpStage(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, skip_channels: int, *, blocks: int, sorted: bool = False) -> None:
         super().__init__()
-        import torchsparse
-        import torchsparse.nn as spnn
-
-        self._torchsparse = torchsparse
-        self.up = nn.Sequential(
-            spnn.Conv3d(in_channels, out_channels, kernel_size=2, stride=2, transposed=True, generative=False),
-            spnn.BatchNorm(out_channels),
-            spnn.ReLU(True),
-        )
+        self.up = GeometricTemplateKernel8InverseConv3d(in_channels, out_channels)
+        self.bn = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU(True)
         self.blocks = _make_gt_res_stack(
             in_channels=out_channels + skip_channels,
             out_channels=out_channels,
@@ -467,12 +462,9 @@ class _GTMinkUNetUpStage(nn.Module):
         )
 
     def forward(self, x: GTSparseSparseConvTensor, skip: GTSparseSparseConvTensor) -> GTSparseSparseConvTensor:
-        x_ts = self.up(_gtsparse_to_torchsparse(x))
-        skip_ts = _gtsparse_to_torchsparse(skip)
-        x_ts = self._torchsparse.cat([x_ts, skip_ts])
-        x_ts.spatial_range = skip_ts.spatial_range
-        x_ts._caches.cmaps[x_ts.stride] = (x_ts.coords, x_ts.spatial_range)
-        x = _torchsparse_to_gtsparse(x_ts)
+        x = self.up(x)
+        x.replace_feature_(self.relu(self.bn(x.features)))
+        x = _cat_gtsparse(x, skip)
         return self.blocks(x)
 
 

@@ -75,6 +75,18 @@ torch::Tensor kernel9_fp32_forward(
     torch::Tensor input_row_offsets,
     int64_t n_out);
 
+torch::Tensor kernel8_fp16_forward(
+    torch::Tensor features, torch::Tensor logical_weight, torch::Tensor out_rows,
+    torch::Tensor input_rows_w1, torch::Tensor input_rows_w2,
+    torch::Tensor input_rows_w4, torch::Tensor input_rows_w8,
+    torch::Tensor template_ids, torch::Tensor input_row_offsets, int64_t n_out);
+
+torch::Tensor kernel8_fp32_forward(
+    torch::Tensor features, torch::Tensor logical_weight, torch::Tensor out_rows,
+    torch::Tensor input_rows_w1, torch::Tensor input_rows_w2,
+    torch::Tensor input_rows_w4, torch::Tensor input_rows_w8,
+    torch::Tensor template_ids, torch::Tensor input_row_offsets, int64_t n_out);
+
 torch::Tensor finalize_row_template_center_last_fp32_forward(
     torch::Tensor features,
     torch::Tensor logical_weight,
@@ -391,3 +403,4 @@ void register_gtsparse3d_finalize_row_template_center_last_build_reverse_runtime
 void register_gtsparse3d_finalize_row_template_center_last_build_reverse_from_full_runtime_cuda(pybind11::module& m);
 void register_gtsparse_kernel3_cuda(pybind11::module& m);
 void register_gtsparse_kernel9_cuda(pybind11::module& m);
+void register_gtsparse_kernel8_cuda(pybind11::module& m);

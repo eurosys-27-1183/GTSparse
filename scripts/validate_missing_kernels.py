@@ -6,6 +6,8 @@ import torch
 
 from gtsparse.sparse3d.geometric_template import (
     GeometricTemplateKernel3Conv3d,
+    GeometricTemplateKernel8Conv3d,
+    GeometricTemplateKernel8InverseConv3d,
     GeometricTemplateKernel9Conv3d,
 )
 from gtsparse.sparse3d.sparse_tensor import GTSparseSparseConvTensor
@@ -61,6 +63,34 @@ def reference_kernel9(features, weight, input_coords, output_coords, input_spati
         output[found] += features[order[safe[found]]] @ weight[offset]
     if bias is not None:
         output += bias
+    return output
+
+
+def reference_kernel8(features, weight, input_coords, output_coords, input_spatial, inverse=False):
+    sorted_keys, order = torch.sort(linear_keys(input_coords, input_spatial))
+    output = torch.zeros((output_coords.size(0), weight.size(2)), device=features.device, dtype=features.dtype)
+    spatial = torch.tensor(input_spatial, device=features.device)
+    for offset in range(8):
+        rd, remain = divmod(offset, 4)
+        rh, rw = divmod(remain, 2)
+        query = output_coords.clone()
+        if inverse:
+            query[:, 1] -= rd
+            query[:, 2] -= rh
+            query[:, 3] -= rw
+            valid = (query[:, 1:].remainder(2) == 0).all(dim=1)
+            query[:, 1:] = torch.div(query[:, 1:], 2, rounding_mode="floor")
+            valid &= ((query[:, 1:] >= 0) & (query[:, 1:] < spatial)).all(dim=1)
+        else:
+            query[:, 1] = query[:, 1] * 2 + rd
+            query[:, 2] = query[:, 2] * 2 + rh
+            query[:, 3] = query[:, 3] * 2 + rw
+            valid = ((query[:, 1:] >= 0) & (query[:, 1:] < spatial)).all(dim=1)
+        query_keys = linear_keys(query, input_spatial)
+        positions = torch.searchsorted(sorted_keys, query_keys)
+        safe = positions.clamp_max(sorted_keys.numel() - 1)
+        found = valid & positions.lt(sorted_keys.numel()) & sorted_keys[safe].eq(query_keys)
+        output[found] += features[order[safe[found]]] @ weight[offset]
     return output
 
 
@@ -179,6 +209,56 @@ def validate_kernel9_dtype(dtype, device):
     )
 
 
+def validate_kernel8_dtype(dtype, channels, device):
+    spatial = (25, 25, 25)
+    coords = torch.tensor(
+        [
+            (0, d, h, w)
+            for d in range(spatial[0])
+            for h in range(spatial[1])
+            for w in range(spatial[2])
+            if (d * 3 + h * 5 + w * 7) % 17 < 3
+        ],
+        device=device,
+        dtype=torch.int32,
+    )
+    features = (torch.randn(coords.size(0), channels, device=device) * 0.1).to(dtype)
+    sparse_input = GTSparseSparseConvTensor(features, coords, spatial, 1)
+    down = GeometricTemplateKernel8Conv3d(channels, channels).to(device=device, dtype=dtype).eval()
+    with torch.inference_mode():
+        down_output = down(sparse_input)
+    runtime, _ = down.build_runtime(sparse_input)
+    validate_stream(runtime, down_output.features.size(0))
+    down_reference = reference_kernel8(
+        features, down.weight.detach(), coords, down_output.indices, spatial
+    )
+    down_error = (down_output.features - down_reference).abs().max().item()
+
+    inverse_features = (torch.randn_like(down_output.features.float()) * 0.1).to(dtype)
+    inverse = GeometricTemplateKernel8InverseConv3d(channels, channels).to(device=device, dtype=dtype).eval()
+    inverse_input = down_output.replace_feature(inverse_features)
+    reverse_runtime = inverse_input.metadata.reverse_chain[0].runtime.build()
+    with torch.inference_mode():
+        inverse_output = inverse(inverse_input)
+    validate_stream(reverse_runtime, inverse_output.features.size(0))
+    inverse_reference = reference_kernel8(
+        inverse_features,
+        inverse.weight.detach(),
+        down_output.indices,
+        inverse_output.indices,
+        down_output.spatial_shape,
+        inverse=True,
+    )
+    inverse_error = (inverse_output.features - inverse_reference).abs().max().item()
+    tolerance = 1e-5 if dtype == torch.float32 else 2e-3
+    assert down_error <= tolerance
+    assert inverse_error <= tolerance
+    print(
+        f"kernel8 {dtype} channels={channels} input_rows={coords.size(0)} "
+        f"down_error={down_error:.9g} inverse_error={inverse_error:.9g}"
+    )
+
+
 def main():
     args = parse_args()
     torch.manual_seed(0)
@@ -186,6 +266,10 @@ def main():
     validate_dtype(torch.float16, args.device)
     validate_kernel9_dtype(torch.float32, args.device)
     validate_kernel9_dtype(torch.float16, args.device)
+    validate_kernel8_dtype(torch.float32, 32, args.device)
+    validate_kernel8_dtype(torch.float32, 64, args.device)
+    validate_kernel8_dtype(torch.float16, 32, args.device)
+    validate_kernel8_dtype(torch.float16, 64, args.device)
 
 
 if __name__ == "__main__":

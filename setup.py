@@ -117,6 +117,8 @@ def sparse_cnn_sources():
         str(GTSPARSE_CUDA_DIR / "kernel3_fp16.cu"),
         str(GTSPARSE_CUDA_DIR / "kernel9_fp32.cu"),
         str(GTSPARSE_CUDA_DIR / "kernel9_fp16.cu"),
+        str(GTSPARSE_CUDA_DIR / "kernel8_fp32.cu"),
+        str(GTSPARSE_CUDA_DIR / "kernel8_fp16.cu"),
         str(GTSPARSE_CUDA_DIR / "entry.cu"),
         str(GTSPARSE_CUDA_DIR / "build_runtime_from_coords.cu"),
         str(GTSPARSE_CUDA_DIR / "build_runtime_from_dense_out_in_map.cu"),
@@ -125,6 +127,7 @@ def sparse_cnn_sources():
         str(GTSPARSE_CUDA_DIR / "build_reverse_runtime_from_full_runtime.cu"),
         str(GTSPARSE_CUDA_DIR / "build_full_runtime_k3.cu"),
         str(GTSPARSE_CUDA_DIR / "build_runtime_k9.cu"),
+        str(GTSPARSE_CUDA_DIR / "build_runtime_k8.cu"),
     ]
 def get_target_sms(arch_args):
     sms = []
