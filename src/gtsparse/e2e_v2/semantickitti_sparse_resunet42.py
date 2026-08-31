@@ -352,11 +352,14 @@ class _GTResBlock(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, *, sorted: bool = False) -> None:
         super().__init__()
         self.conv1 = GeometricTemplateSubMConv3d(in_channels, out_channels, 3, padding=1, bias=False, sorted=bool(sorted))
-        self.bn1 = nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.01)
+        self.bn1 = nn.BatchNorm1d(out_channels)
         self.relu = nn.ReLU()
         self.conv2 = GeometricTemplateSubMConv3d(out_channels, out_channels, 3, padding=1, bias=False, sorted=bool(sorted))
-        self.bn2 = nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.01)
-        self.shortcut = nn.Linear(in_channels, out_channels, bias=False) if in_channels != out_channels else None
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.shortcut = nn.Sequential(
+            nn.Linear(in_channels, out_channels, bias=False),
+            nn.BatchNorm1d(out_channels),
+        ) if in_channels != out_channels else None
 
     def forward(self, x: GTSparseSparseConvTensor) -> GTSparseSparseConvTensor:
         identity = x.features if self.shortcut is None else self.shortcut(x.features)
@@ -423,11 +426,11 @@ def _torchsparse_to_gtsparse(x) -> GTSparseSparseConvTensor:
 class _GTMinkUNetDownStage(nn.Module):
     def __init__(self, in_channels: int, out_channels: int, *, blocks: int, sorted: bool = False) -> None:
         super().__init__()
-        self.down = GeometricTemplateKernel8Conv3d(in_channels, out_channels)
-        self.bn = nn.BatchNorm1d(out_channels)
+        self.down = GeometricTemplateKernel8Conv3d(in_channels, in_channels)
+        self.bn = nn.BatchNorm1d(in_channels)
         self.relu = nn.ReLU(True)
         self.blocks = _make_gt_res_stack(
-            in_channels=out_channels,
+            in_channels=in_channels,
             out_channels=out_channels,
             blocks=blocks,
             sorted=bool(sorted),
@@ -594,14 +597,23 @@ class _SpconvResBlock(nn.Module):
         import spconv.pytorch as spconv
 
         self.conv1 = spconv.SubMConv3d(in_channels, out_channels, 3, padding=1, bias=False, indice_key=indice_key)
-        self.bn1 = nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.01)
+        self.bn1 = nn.BatchNorm1d(out_channels)
         self.relu = nn.ReLU()
         self.conv2 = spconv.SubMConv3d(out_channels, out_channels, 3, padding=1, bias=False, indice_key=indice_key)
-        self.bn2 = nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.01)
-        self.shortcut = nn.Linear(in_channels, out_channels, bias=False) if in_channels != out_channels else None
+        self.bn2 = nn.BatchNorm1d(out_channels)
+        self.shortcut = spconv.SparseSequential(
+            spconv.SubMConv3d(
+                in_channels,
+                out_channels,
+                1,
+                bias=False,
+                indice_key=None if indice_key is None else indice_key + "_shortcut",
+            ),
+            nn.BatchNorm1d(out_channels),
+        ) if in_channels != out_channels else None
 
     def forward(self, x):
-        identity = x.features if self.shortcut is None else self.shortcut(x.features)
+        identity = x.features if self.shortcut is None else self.shortcut(x).features
         out = self.conv1(x)
         out = _replace_features_generic(out, self.relu(self.bn1(out.features)))
         out = self.conv2(out)
@@ -695,11 +707,14 @@ class _MinkowskiResBlock(nn.Module):
         import MinkowskiEngine as ME
 
         self.conv1 = ME.MinkowskiConvolution(in_channels, out_channels, kernel_size=3, stride=1, dimension=3)
-        self.bn1 = ME.MinkowskiBatchNorm(out_channels, eps=1e-3, momentum=0.01)
+        self.bn1 = ME.MinkowskiBatchNorm(out_channels)
         self.relu = ME.MinkowskiReLU()
         self.conv2 = ME.MinkowskiConvolution(out_channels, out_channels, kernel_size=3, stride=1, dimension=3)
-        self.bn2 = ME.MinkowskiBatchNorm(out_channels, eps=1e-3, momentum=0.01)
-        self.shortcut = nn.Sequential(ME.MinkowskiLinear(in_channels, out_channels, bias=False), ME.MinkowskiBatchNorm(out_channels, eps=1e-3, momentum=0.01)) if in_channels != out_channels else nn.Identity()
+        self.bn2 = ME.MinkowskiBatchNorm(out_channels)
+        self.shortcut = nn.Sequential(
+            ME.MinkowskiConvolution(in_channels, out_channels, kernel_size=1, bias=False, dimension=3),
+            ME.MinkowskiBatchNorm(out_channels),
+        ) if in_channels != out_channels else nn.Identity()
 
     def forward(self, x):
         out = self.conv1(x)
@@ -790,9 +805,9 @@ class GeometricTemplateMinkUNetBackbone(nn.Module):
         p = MINKUNET_PLANES
         l = MINKUNET_LAYERS
         self.stem0 = GeometricTemplateSubMConv3d(model_cfg.input_channels, p[0], 3, padding=1, bias=False, sorted=bool(sorted))
-        self.stem0_bn = nn.BatchNorm1d(p[0], eps=1e-3, momentum=0.01)
+        self.stem0_bn = nn.BatchNorm1d(p[0])
         self.stem1 = GeometricTemplateSubMConv3d(p[0], p[0], 3, padding=1, bias=False, sorted=bool(sorted))
-        self.stem1_bn = nn.BatchNorm1d(p[0], eps=1e-3, momentum=0.01)
+        self.stem1_bn = nn.BatchNorm1d(p[0])
         self.relu = nn.ReLU()
         self.down1 = _GTMinkUNetDownStage(p[0], p[0], blocks=l[0], sorted=bool(sorted))
         self.down2 = _GTMinkUNetDownStage(p[0], p[1], blocks=l[1], sorted=bool(sorted))
@@ -844,15 +859,22 @@ class TorchSparseMinkUNetBackbone(nn.Module):
         l = MINKUNET_LAYERS
         self._torchsparse = torchsparse
         self.sparse_shape = data_cfg.sparse_shape_zyx
-        self.stem = nn.Sequential(spnn.Conv3d(model_cfg.input_channels, p[0], kernel_size=5), spnn.BatchNorm(p[0]), spnn.ReLU(True))
+        self.stem = nn.Sequential(
+            spnn.Conv3d(model_cfg.input_channels, p[0], kernel_size=3),
+            spnn.BatchNorm(p[0]),
+            spnn.ReLU(True),
+            spnn.Conv3d(p[0], p[0], kernel_size=3),
+            spnn.BatchNorm(p[0]),
+            spnn.ReLU(True),
+        )
         self.down1 = nn.Sequential(spnn.Conv3d(p[0], p[0], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[0]), spnn.ReLU(True))
         self.block1 = _make_torchsparse_res_stack(in_channels=p[0], out_channels=p[0], blocks=l[0])
-        self.down2 = nn.Sequential(spnn.Conv3d(p[0], p[1], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[1]), spnn.ReLU(True))
-        self.block2 = _make_torchsparse_res_stack(in_channels=p[1], out_channels=p[1], blocks=l[1])
-        self.down3 = nn.Sequential(spnn.Conv3d(p[1], p[2], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[2]), spnn.ReLU(True))
-        self.block3 = _make_torchsparse_res_stack(in_channels=p[2], out_channels=p[2], blocks=l[2])
-        self.down4 = nn.Sequential(spnn.Conv3d(p[2], p[3], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[3]), spnn.ReLU(True))
-        self.block4 = _make_torchsparse_res_stack(in_channels=p[3], out_channels=p[3], blocks=l[3])
+        self.down2 = nn.Sequential(spnn.Conv3d(p[0], p[0], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[0]), spnn.ReLU(True))
+        self.block2 = _make_torchsparse_res_stack(in_channels=p[0], out_channels=p[1], blocks=l[1])
+        self.down3 = nn.Sequential(spnn.Conv3d(p[1], p[1], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[1]), spnn.ReLU(True))
+        self.block3 = _make_torchsparse_res_stack(in_channels=p[1], out_channels=p[2], blocks=l[2])
+        self.down4 = nn.Sequential(spnn.Conv3d(p[2], p[2], kernel_size=2, stride=2, generative=False), spnn.BatchNorm(p[2]), spnn.ReLU(True))
+        self.block4 = _make_torchsparse_res_stack(in_channels=p[2], out_channels=p[3], blocks=l[3])
         self.up4 = nn.Sequential(spnn.Conv3d(p[3], p[4], kernel_size=2, stride=2, transposed=True, generative=False), spnn.BatchNorm(p[4]), spnn.ReLU(True))
         self.block5 = _make_torchsparse_res_stack(in_channels=p[4] + p[2], out_channels=p[4], blocks=l[4])
         self.up3 = nn.Sequential(spnn.Conv3d(p[4], p[5], kernel_size=2, stride=2, transposed=True, generative=False), spnn.BatchNorm(p[5]), spnn.ReLU(True))
@@ -893,22 +915,29 @@ class SpconvMinkUNetBackbone(nn.Module):
         l = MINKUNET_LAYERS
         self._spconv = spconv
         self.sparse_shape = data_cfg.sparse_shape_zyx
-        self.stem = spconv.SparseSequential(spconv.SubMConv3d(model_cfg.input_channels, p[0], 5, padding=2, bias=False, indice_key="stem"), nn.BatchNorm1d(p[0], eps=1e-3, momentum=0.01), nn.ReLU())
-        self.down1 = spconv.SparseSequential(spconv.SparseConv3d(p[0], p[0], 2, stride=2, padding=0, bias=False, indice_key="m1"), nn.BatchNorm1d(p[0], eps=1e-3, momentum=0.01), nn.ReLU())
+        self.stem = spconv.SparseSequential(
+            spconv.SubMConv3d(model_cfg.input_channels, p[0], 3, padding=1, bias=False, indice_key="stem"),
+            nn.BatchNorm1d(p[0]),
+            nn.ReLU(),
+            spconv.SubMConv3d(p[0], p[0], 3, padding=1, bias=False, indice_key="stem"),
+            nn.BatchNorm1d(p[0]),
+            nn.ReLU(),
+        )
+        self.down1 = spconv.SparseSequential(spconv.SparseConv3d(p[0], p[0], 2, stride=2, padding=0, bias=False, indice_key="m1"), nn.BatchNorm1d(p[0]), nn.ReLU())
         self.block1 = _make_spconv_res_stack(in_channels=p[0], out_channels=p[0], blocks=l[0], indice_key="b1")
-        self.down2 = spconv.SparseSequential(spconv.SparseConv3d(p[0], p[1], 2, stride=2, padding=0, bias=False, indice_key="m2"), nn.BatchNorm1d(p[1], eps=1e-3, momentum=0.01), nn.ReLU())
-        self.block2 = _make_spconv_res_stack(in_channels=p[1], out_channels=p[1], blocks=l[1], indice_key="b2")
-        self.down3 = spconv.SparseSequential(spconv.SparseConv3d(p[1], p[2], 2, stride=2, padding=0, bias=False, indice_key="m3"), nn.BatchNorm1d(p[2], eps=1e-3, momentum=0.01), nn.ReLU())
-        self.block3 = _make_spconv_res_stack(in_channels=p[2], out_channels=p[2], blocks=l[2], indice_key="b3")
-        self.down4 = spconv.SparseSequential(spconv.SparseConv3d(p[2], p[3], 2, stride=2, padding=0, bias=False, indice_key="m4"), nn.BatchNorm1d(p[3], eps=1e-3, momentum=0.01), nn.ReLU())
-        self.block4 = _make_spconv_res_stack(in_channels=p[3], out_channels=p[3], blocks=l[3], indice_key="b4")
-        self.up4 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[3], p[4], 2, indice_key="m4", bias=False), nn.BatchNorm1d(p[4], eps=1e-3, momentum=0.01), nn.ReLU())
+        self.down2 = spconv.SparseSequential(spconv.SparseConv3d(p[0], p[0], 2, stride=2, padding=0, bias=False, indice_key="m2"), nn.BatchNorm1d(p[0]), nn.ReLU())
+        self.block2 = _make_spconv_res_stack(in_channels=p[0], out_channels=p[1], blocks=l[1], indice_key="b2")
+        self.down3 = spconv.SparseSequential(spconv.SparseConv3d(p[1], p[1], 2, stride=2, padding=0, bias=False, indice_key="m3"), nn.BatchNorm1d(p[1]), nn.ReLU())
+        self.block3 = _make_spconv_res_stack(in_channels=p[1], out_channels=p[2], blocks=l[2], indice_key="b3")
+        self.down4 = spconv.SparseSequential(spconv.SparseConv3d(p[2], p[2], 2, stride=2, padding=0, bias=False, indice_key="m4"), nn.BatchNorm1d(p[2]), nn.ReLU())
+        self.block4 = _make_spconv_res_stack(in_channels=p[2], out_channels=p[3], blocks=l[3], indice_key="b4")
+        self.up4 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[3], p[4], 2, indice_key="m4", bias=False), nn.BatchNorm1d(p[4]), nn.ReLU())
         self.block5 = _make_spconv_res_stack(in_channels=p[4] + p[2], out_channels=p[4], blocks=l[4], indice_key="u4")
-        self.up3 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[4], p[5], 2, indice_key="m3", bias=False), nn.BatchNorm1d(p[5], eps=1e-3, momentum=0.01), nn.ReLU())
+        self.up3 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[4], p[5], 2, indice_key="m3", bias=False), nn.BatchNorm1d(p[5]), nn.ReLU())
         self.block6 = _make_spconv_res_stack(in_channels=p[5] + p[1], out_channels=p[5], blocks=l[5], indice_key="u3")
-        self.up2 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[5], p[6], 2, indice_key="m2", bias=False), nn.BatchNorm1d(p[6], eps=1e-3, momentum=0.01), nn.ReLU())
+        self.up2 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[5], p[6], 2, indice_key="m2", bias=False), nn.BatchNorm1d(p[6]), nn.ReLU())
         self.block7 = _make_spconv_res_stack(in_channels=p[6] + p[0], out_channels=p[6], blocks=l[6], indice_key="u2")
-        self.up1 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[6], p[7], 2, indice_key="m1", bias=False), nn.BatchNorm1d(p[7], eps=1e-3, momentum=0.01), nn.ReLU())
+        self.up1 = spconv.SparseSequential(spconv.SparseInverseConv3d(p[6], p[7], 2, indice_key="m1", bias=False), nn.BatchNorm1d(p[7]), nn.ReLU())
         self.block8 = _make_spconv_res_stack(in_channels=p[7] + p[0], out_channels=p[7], blocks=l[7], indice_key="u1")
         self.out_channels = p[7]
 
@@ -949,22 +978,29 @@ class MinkowskiMinkUNetBackbone(nn.Module):
         p = MINKUNET_PLANES
         l = MINKUNET_LAYERS
         self._ME = ME
-        self.stem = nn.Sequential(ME.MinkowskiConvolution(model_cfg.input_channels, p[0], kernel_size=5, stride=1, dimension=3), ME.MinkowskiBatchNorm(p[0], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
-        self.down1 = nn.Sequential(ME.MinkowskiConvolution(p[0], p[0], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[0], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
+        self.stem = nn.Sequential(
+            ME.MinkowskiConvolution(model_cfg.input_channels, p[0], kernel_size=3, stride=1, dimension=3),
+            ME.MinkowskiBatchNorm(p[0]),
+            ME.MinkowskiReLU(),
+            ME.MinkowskiConvolution(p[0], p[0], kernel_size=3, stride=1, dimension=3),
+            ME.MinkowskiBatchNorm(p[0]),
+            ME.MinkowskiReLU(),
+        )
+        self.down1 = nn.Sequential(ME.MinkowskiConvolution(p[0], p[0], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[0]), ME.MinkowskiReLU())
         self.block1 = _make_minkowski_res_stack(in_channels=p[0], out_channels=p[0], blocks=l[0])
-        self.down2 = nn.Sequential(ME.MinkowskiConvolution(p[0], p[1], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[1], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
-        self.block2 = _make_minkowski_res_stack(in_channels=p[1], out_channels=p[1], blocks=l[1])
-        self.down3 = nn.Sequential(ME.MinkowskiConvolution(p[1], p[2], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[2], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
-        self.block3 = _make_minkowski_res_stack(in_channels=p[2], out_channels=p[2], blocks=l[2])
-        self.down4 = nn.Sequential(ME.MinkowskiConvolution(p[2], p[3], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[3], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
-        self.block4 = _make_minkowski_res_stack(in_channels=p[3], out_channels=p[3], blocks=l[3])
-        self.up4 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[3], p[4], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[4], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
+        self.down2 = nn.Sequential(ME.MinkowskiConvolution(p[0], p[0], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[0]), ME.MinkowskiReLU())
+        self.block2 = _make_minkowski_res_stack(in_channels=p[0], out_channels=p[1], blocks=l[1])
+        self.down3 = nn.Sequential(ME.MinkowskiConvolution(p[1], p[1], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[1]), ME.MinkowskiReLU())
+        self.block3 = _make_minkowski_res_stack(in_channels=p[1], out_channels=p[2], blocks=l[2])
+        self.down4 = nn.Sequential(ME.MinkowskiConvolution(p[2], p[2], kernel_size=2, stride=2, dimension=3), ME.MinkowskiBatchNorm(p[2]), ME.MinkowskiReLU())
+        self.block4 = _make_minkowski_res_stack(in_channels=p[2], out_channels=p[3], blocks=l[3])
+        self.up4 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[3], p[4], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[4]), ME.MinkowskiReLU())
         self.block5 = _make_minkowski_res_stack(in_channels=p[4] + p[2], out_channels=p[4], blocks=l[4])
-        self.up3 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[4], p[5], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[5], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
+        self.up3 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[4], p[5], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[5]), ME.MinkowskiReLU())
         self.block6 = _make_minkowski_res_stack(in_channels=p[5] + p[1], out_channels=p[5], blocks=l[5])
-        self.up2 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[5], p[6], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[6], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
+        self.up2 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[5], p[6], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[6]), ME.MinkowskiReLU())
         self.block7 = _make_minkowski_res_stack(in_channels=p[6] + p[0], out_channels=p[6], blocks=l[6])
-        self.up1 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[6], p[7], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[7], eps=1e-3, momentum=0.01), ME.MinkowskiReLU())
+        self.up1 = nn.Sequential(ME.MinkowskiConvolutionTranspose(p[6], p[7], kernel_size=2, stride=2, expand_coordinates=False, dimension=3), ME.MinkowskiBatchNorm(p[7]), ME.MinkowskiReLU())
         self.block8 = _make_minkowski_res_stack(in_channels=p[7] + p[0], out_channels=p[7], blocks=l[7])
         self.out_channels = p[7]
 
