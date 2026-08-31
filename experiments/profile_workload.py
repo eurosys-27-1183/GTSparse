@@ -20,6 +20,7 @@ from gtsparse.sparse3d.geometric_template import (
 capture = False
 current_layers = []
 original_conv = gt_ops._conv
+TORCHSPARSE_BM = 128
 
 K3_OFFSETS = ((0,), (1,), (2,), (0, 1), (0, 2), (1, 2), (0, 1, 2))
 K9_OFFSETS = (
@@ -62,8 +63,12 @@ def _spconv_offset_rows(masks: np.ndarray, tile_rows: int) -> int:
     issued = 0
     for start in range(0, len(masks), tile_rows):
         tile = masks[start : start + tile_rows]
-        issued += len(tile) * int(int(np.bitwise_or.reduce(tile)).bit_count())
+        issued += tile_rows * int(int(np.bitwise_or.reduce(tile)).bit_count())
     return issued
+
+
+def _padded_rows(rows: int, tile_rows: int) -> int:
+    return ((int(rows) + int(tile_rows) - 1) // int(tile_rows)) * int(tile_rows)
 
 
 def observe_runtime(kind, features, logical_weight, runtime) -> None:
@@ -72,8 +77,8 @@ def observe_runtime(kind, features, logical_weight, runtime) -> None:
     masks = _runtime_masks(runtime, counts)
     active_pairs = int(sum(int(value).bit_count() for value in masks))
     widths = (1, 10, 10, 10, 19, 19, 19, 27)
-    gtsparse_offset_rows = sum(count * width for count, width in zip(counts, widths))
-    full_offset_rows = int(runtime.n_out) * 27
+    gtsparse_offset_rows = sum(count * width for count, width in zip(padded_counts, widths))
+    full_offset_rows = _padded_rows(int(runtime.n_out), TORCHSPARSE_BM) * 27
     spconv_offset_rows = {tile_rows: _spconv_offset_rows(masks, tile_rows) for tile_rows in (32, 64, 128)}
     cin = int(features.size(1))
     cout = int(logical_weight.size(-1))
@@ -138,7 +143,7 @@ def observe_special(kind, features, logical_weight, runtime, offsets) -> None:
         masks.append((((buffer >= 0).to(torch.int64) * bits).sum(dim=1)).cpu().numpy().astype(np.uint32))
     masks = np.concatenate(masks) if masks else np.empty(0, dtype=np.uint32)
     active_pairs = int(sum(int(value).bit_count() for value in masks))
-    issued_rows = sum(count * len(template) for count, template in zip(counts, offsets))
+    issued_rows = sum(count * len(template) for count, template in zip(padded_counts, offsets))
     n_out = int(runtime.out_coords.size(0))
     kernel_volume = max(max(template, default=-1) for template in offsets) + 1
     cin = int(features.size(1))
@@ -155,7 +160,7 @@ def observe_special(kind, features, logical_weight, runtime, offsets) -> None:
         "spconv_issued_flops_bm64": spconv_rows[64] * flops_per_pair,
         "spconv_issued_flops_bm128": spconv_rows[128] * flops_per_pair,
         "template_counts": counts,
-        "torchsparse_issued_flops": n_out * kernel_volume * flops_per_pair,
+        "torchsparse_issued_flops": _padded_rows(n_out, TORCHSPARSE_BM) * kernel_volume * flops_per_pair,
     })
 
 
@@ -225,21 +230,21 @@ def main() -> None:
                 batch = move_batch(batch, args.device, dtype)
                 sparse_forward(model, batch, args.workload)
                 torch.cuda.synchronize(args.device)
-                family_counts = [0, 0, 0, 0]
+                kernel27_family_counts = [0, 0, 0, 0]
                 for layer in current_layers:
                     if layer["kind"] != "native":
                         continue
                     counts = layer["template_counts"]
-                    family_counts[0] += counts[0]
-                    family_counts[1] += sum(counts[1:4])
-                    family_counts[2] += sum(counts[4:7])
-                    family_counts[3] += counts[7]
+                    kernel27_family_counts[0] += counts[0]
+                    kernel27_family_counts[1] += sum(counts[1:4])
+                    kernel27_family_counts[2] += sum(counts[4:7])
+                    kernel27_family_counts[3] += counts[7]
                 record = {
                     "effective_flops": sum(layer["effective_flops"] for layer in current_layers),
-                    "family_counts": family_counts,
                     "frame_ids": list(batch.frame_ids),
                     "gpu": torch.cuda.get_device_name(torch.device(args.device)),
                     "gtsparse_issued_flops": sum(layer["gtsparse_issued_flops"] for layer in current_layers),
+                    "kernel27_family_counts": kernel27_family_counts,
                     "layers": current_layers,
                     "minkowski_issued_flops": sum(layer["minkowski_issued_flops"] for layer in current_layers),
                     "torchsparse_issued_flops": sum(layer["torchsparse_issued_flops"] for layer in current_layers),

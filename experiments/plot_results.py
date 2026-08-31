@@ -113,7 +113,7 @@ def plot_template_distribution(rows, figures: Path) -> None:
         len(rows),
         2,
         7.2,
-        "Template assignment distribution (% of output voxels per family).\nAvg Width is the mean assigned template width in offsets.",
+        "3×3×3 template assignment distribution (% of output voxels in K=27 layers).\nAvg Width is the output-row-weighted assigned template width in offsets.",
     )
     top = len(rows) + 2
     table_rule(axis, top, edges[0], edges[-1], 1.2)
@@ -133,7 +133,7 @@ def plot_template_distribution(rows, figures: Path) -> None:
             f"{float(row['skip2_percent']):.1f}",
             f"{float(row['skip1_percent']):.1f}",
             f"{float(row['full27_percent']):.1f}",
-            f"{float(row['avg_width']):.1f}",
+            f"{float(row['avg_assigned_width']):.1f}",
         )
         for column, value in enumerate(values):
             axis.text(centers[column], y, value, ha="center", va="center", fontsize=10)

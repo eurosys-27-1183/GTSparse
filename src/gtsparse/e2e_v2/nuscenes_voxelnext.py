@@ -989,6 +989,9 @@ class NuScenesVoxelNeXtModel(nn.Module):
     def forward_sparse_backbone_raw(self, voxel_features: torch.Tensor, voxel_coords: torch.Tensor, batch_size: int):
         return self.sparse_backbone.forward_trunk_raw(voxel_features, voxel_coords, batch_size)
 
+    def forward_sparse_convolutions(self, voxel_features: torch.Tensor, voxel_coords: torch.Tensor, batch_size: int) -> SparseBEVOutput:
+        return self.sparse_backbone(voxel_features, voxel_coords, batch_size)
+
     def forward_sparse_backbone_from_batch(self, batch: KittiSecondBatch | dict[str, torch.Tensor]) -> SparseTrunkOutput:
         voxel_features, voxel_coords, batch_size = self.encode_batch(batch)
         return self.forward_sparse_backbone(voxel_features, voxel_coords, batch_size)

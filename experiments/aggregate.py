@@ -72,15 +72,16 @@ def profile_rows(root: Path):
         records = read_jsonl(path)
         if not records:
             continue
-        counts = [sum(record["family_counts"][index] for record in records) for index in range(4)]
+        counts = [sum(record["kernel27_family_counts"][index] for record in records) for index in range(4)]
         total = sum(counts)
         widths = (1, 10, 19, 27)
         row = {
-            "avg_width": sum(count * width for count, width in zip(counts, widths)) / total,
+            "avg_assigned_width": sum(count * width for count, width in zip(counts, widths)) / total,
             "center_percent": 100 * counts[0] / total,
             "frames": len(records),
             "full27_percent": 100 * counts[3] / total,
             "gpu": records[0]["gpu"],
+            "kernel_size": "3x3x3",
             "skip1_percent": 100 * counts[2] / total,
             "skip2_percent": 100 * counts[1] / total,
             "workload": records[0]["workload"],
@@ -107,12 +108,25 @@ def spconv_issued_flops(profile_record, spconv_record) -> int:
     return issued
 
 
+def torchsparse_issued_flops(profile_record, spconv_record) -> int:
+    if len(profile_record["layers"]) != len(spconv_record["layers"]):
+        raise ValueError("GTSparse and SpConv profiles contain different sparse-convolution layer counts")
+    issued = 0
+    voxelnext_bev_conv = False
+    for gtsparse_layer, spconv_layer in zip(profile_record["layers"], spconv_record["layers"]):
+        if profile_record["workload"].startswith("voxelnext_") and gtsparse_layer["kind"] == "kernel9" and not voxelnext_bev_conv:
+            issued += gtsparse_layer[f"spconv_issued_flops_bm{spconv_layer['tile_rows']}"]
+            voxelnext_bev_conv = True
+        else:
+            issued += gtsparse_layer["torchsparse_issued_flops"]
+    return issued
+
+
 def throughput_rows(summary, raw_profiles, spconv_profiles):
     rows = []
     issued_key = {
         "gtsparse": "gtsparse_issued_flops",
         "minkowski": "minkowski_issued_flops",
-        "torchsparse": "torchsparse_issued_flops",
     }
     for timing in summary:
         if timing["experiment"] != "microbenchmark" or timing["metric"] != "conv_only":
@@ -129,6 +143,12 @@ def throughput_rows(summary, raw_profiles, spconv_profiles):
                 continue
             by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
             issued = statistics.mean(spconv_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records)
+        elif backend == "torchsparse":
+            spconv_records = spconv_profiles.get(key)
+            if not spconv_records:
+                continue
+            by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
+            issued = statistics.mean(torchsparse_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records)
         else:
             issued = statistics.mean(record[issued_key[backend]] for record in records)
         median_ms = float(timing["median_ms"])
@@ -233,7 +253,7 @@ def main() -> None:
 
     write_csv(args.results / "latency.csv", ("experiment", "gpu", "dtype", "workload", "sweeps", "backend", "metric", "count", "median_ms", "mean_ms", "min_template"), summaries)
     write_csv(args.results / "per_frame_latency.csv", ("gpu", "dtype", "workload", "backend", "metric", "frame_index", "frame_id", "latency_ms"), per_frame)
-    write_csv(args.results / "template_distribution.csv", ("gpu", "workload", "frames", "center_percent", "skip2_percent", "skip1_percent", "full27_percent", "avg_width"), profiles)
+    write_csv(args.results / "template_distribution.csv", ("gpu", "workload", "kernel_size", "frames", "center_percent", "skip2_percent", "skip1_percent", "full27_percent", "avg_assigned_width"), profiles)
     write_csv(args.results / "effective_throughput.csv", ("gpu", "workload", "backend", "dtype", "raw_tflops", "effective_tflops", "proportionality_percent"), throughput)
     write_csv(
         args.results / "time_breakdown.csv",

@@ -1394,6 +1394,9 @@ class KittiSecondModel(nn.Module):
     def forward_sparse_backbone(self, voxel_features: torch.Tensor, voxel_coords: torch.Tensor, batch_size: int):
         return self.sparse_backbone(voxel_features, voxel_coords, int(batch_size))
 
+    def forward_sparse_convolutions(self, voxel_features: torch.Tensor, voxel_coords: torch.Tensor, batch_size: int):
+        return self.sparse_backbone(voxel_features, voxel_coords, int(batch_size))
+
     def forward_sparse_design_space(self, voxel_features: torch.Tensor, voxel_coords: torch.Tensor, batch_size: int):
         return self.sparse_backbone.forward_design_space(voxel_features, voxel_coords, int(batch_size))
 
@@ -1501,19 +1504,6 @@ def _iter_device_batches(loader: torch_data.DataLoader, device: str, *, dtype: t
         yield move_kitti_second_batch_to_device(batch, device, dtype=dtype)
 
 
-def _resolve_conv_only_fn(model):
-    for name in (
-        "forward_sparse_design_space_raw",
-        "forward_sparse_backbone_raw",
-        "forward_sparse_design_space",
-        "forward_sparse_backbone",
-    ):
-        fn = getattr(model, name, None)
-        if fn is not None:
-            return fn
-    raise AttributeError(f"{type(model).__name__} does not expose a conv-only forward")
-
-
 def _measure_frame_timings(
     model: KittiSecondModel,
     loader: torch_data.DataLoader,
@@ -1533,7 +1523,7 @@ def _measure_frame_timings(
     local_measure_repeats = max(1, int(timing_repeats))
     resolved_device = require_cuda_device(device)
     runtime_dtype = next(model.parameters()).dtype
-    conv_only_fn = _resolve_conv_only_fn(model)
+    conv_only_fn = model.forward_sparse_convolutions
     warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     with torch.no_grad():
         for _ in range(max(0, int(warmup))):

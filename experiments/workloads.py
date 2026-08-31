@@ -76,7 +76,5 @@ def move_batch(batch, device: str, dtype: torch.dtype):
 def sparse_forward(model, batch, workload: str):
     if workload == "minkunet_semantickitti_sweeps1":
         return model(batch)
-    from gtsparse.e2e_v2.kitti_second import _resolve_conv_only_fn
-
     voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
-    return _resolve_conv_only_fn(model)(voxel_features, voxel_coords, batch_size)
+    return model.forward_sparse_convolutions(voxel_features, voxel_coords, batch_size)
