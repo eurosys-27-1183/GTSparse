@@ -23,7 +23,11 @@ torch.backends.cudnn.allow_tf32 = False
 torchsparse.backends.allow_tf32 = False
 
 from gtsparse.e2e_v2.common import require_cuda_device, resolve_runtime_dtype
-from gtsparse.sparse3d.geometric_template import GeometricTemplateSparseConv3d, GeometricTemplateSubMConv3d
+from gtsparse.sparse3d.geometric_template import (
+    GeometricTemplateKernel9Conv3d,
+    GeometricTemplateSparseConv3d,
+    GeometricTemplateSubMConv3d,
+)
 from gtsparse.sparse3d.sparse_tensor import GTSparseSparseConvTensor
 
 from .kitti_second import (
@@ -376,6 +380,70 @@ class _TorchSparseVoxelNeXtBevTail(nn.Module):
         )
 
 
+class _GTSparseVoxelNeXtBevTail(nn.Module):
+    def __init__(self, in_channels: int, out_channels: int) -> None:
+        super().__init__()
+        self.conv_out = GeometricTemplateKernel9Conv3d(
+            in_channels,
+            out_channels,
+            stride=1,
+            padding=(1, 1, 0),
+            bias=False,
+        )
+        self.conv_out_bn = nn.BatchNorm1d(out_channels, eps=1e-3, momentum=0.01)
+        self.shared_conv = GeometricTemplateKernel9Conv3d(
+            out_channels,
+            out_channels,
+            stride=1,
+            padding=(1, 1, 0),
+            bias=True,
+            subm=True,
+        )
+        self.shared_conv_bn = nn.BatchNorm1d(out_channels)
+        self.relu = nn.ReLU()
+
+    def forward(
+        self,
+        features: torch.Tensor,
+        coords_bzyx: torch.Tensor,
+        *,
+        spatial_shape_zyx: tuple[int, int, int],
+        batch_size: int,
+    ) -> SparseBEVOutput:
+        bev_features, bev_coords, spatial_shape_hw = _collapse_to_bev_sparse(
+            features, coords_bzyx, spatial_shape_zyx
+        )
+        coords = torch.cat(
+            (
+                bev_coords,
+                torch.zeros(
+                    (bev_coords.size(0), 1),
+                    device=bev_coords.device,
+                    dtype=bev_coords.dtype,
+                ),
+            ),
+            dim=1,
+        )
+        x = GTSparseSparseConvTensor(
+            bev_features,
+            coords,
+            (*spatial_shape_hw, 1),
+            int(batch_size),
+        )
+        x = self.conv_out(x)
+        x.replace_feature_(self.relu(self.conv_out_bn(x.features)))
+        x = self.shared_conv(x)
+        x.replace_feature_(self.relu(self.shared_conv_bn(x.features)))
+        return SparseBEVOutput(
+            bev_features=x.features,
+            bev_coords=x.indices[:, :3].contiguous(),
+            spatial_shape_hw=spatial_shape_hw,
+            encoded_stride=8,
+            batch_size=int(batch_size),
+            backend="gtsparse",
+        )
+
+
 class _SpconvVoxelNeXtBevTail(nn.Module):
     def __init__(self, in_channels: int, out_channels: int) -> None:
         super().__init__()
@@ -525,7 +593,7 @@ class GeometricTemplateVoxelNeXtBackbone(nn.Module):
         self.conv4 = _GTDownStage(ch[2], ch[3], sorted=bool(sorted))
         self.conv5 = _GTDownStage(ch[3], ch[4], sorted=bool(sorted))
         self.conv6 = _GTDownStage(ch[4], ch[4], sorted=bool(sorted))
-        self.bev_tail = _TorchSparseVoxelNeXtBevTail(ch[3], model_cfg.out_channels)
+        self.bev_tail = _GTSparseVoxelNeXtBevTail(ch[3], model_cfg.out_channels)
 
     def _forward_trunk_stages(self, voxel_features: torch.Tensor, voxel_coords: torch.Tensor, batch_size: int):
         x = _make_gtsparse_sparse_tensor(voxel_features, voxel_coords, batch_size, self.sparse_shape_list)

@@ -21,12 +21,12 @@ TARGETS = {
         "sparse_backbone.conv_out.conv",
     ),
     "voxelnext_nuscenes_sweeps1": (
-        "sparse_backbone.bev_tail.conv_out.0",
-        "sparse_backbone.bev_tail.shared_conv.0",
+        "sparse_backbone.bev_tail.conv_out",
+        "sparse_backbone.bev_tail.shared_conv",
     ),
     "voxelnext_nuscenes_sweeps10": (
-        "sparse_backbone.bev_tail.conv_out.0",
-        "sparse_backbone.bev_tail.shared_conv.0",
+        "sparse_backbone.bev_tail.conv_out",
+        "sparse_backbone.bev_tail.shared_conv",
     ),
     "minkunet_semantickitti_sweeps1": (
         "sparse_backbone.down1.down.0",
@@ -118,6 +118,64 @@ def kernel3_latency(module, input_tensor, runtime, repeats):
             runtime.input_rows_w1,
             runtime.input_rows_w2,
             runtime.input_rows_w3,
+            runtime.template_ids,
+            runtime.input_row_offsets,
+            runtime.out_coords.size(0),
+        )
+        end.record()
+        events.append((start, end))
+    torch.cuda.synchronize(sparse_features(input_tensor).device)
+    return statistics.median(start.elapsed_time(end) for start, end in events)
+
+
+def kernel9_active_map(module, input_tensor, output_tensor):
+    input_coords = sparse_coords(input_tensor).to(torch.int64)
+    output_coords = sparse_coords(output_tensor).to(torch.int64)
+    spatial = torch.tensor(tuple(input_tensor.spatial_shape), device=input_coords.device)
+    input_keys = (
+        ((input_coords[:, 0] * spatial[0] + input_coords[:, 1]) * spatial[1] + input_coords[:, 2])
+        * spatial[2]
+        + input_coords[:, 3]
+    )
+    sorted_keys, _ = torch.sort(input_keys)
+    offsets = torch.cartesian_prod(
+        torch.arange(3, device=input_coords.device),
+        torch.arange(3, device=input_coords.device),
+    )
+    offsets = torch.cat((offsets, torch.zeros((9, 1), device=input_coords.device)), dim=1)
+    query = (
+        output_coords[:, None, 1:] * torch.tensor(module.stride, device=input_coords.device)
+        - torch.tensor(module.padding, device=input_coords.device)
+        + offsets[None] * torch.tensor(module.dilation, device=input_coords.device)
+    )
+    valid = ((query >= 0) & (query < spatial)).all(dim=2)
+    batches = output_coords[:, None, 0].expand(-1, 9)
+    query_keys = ((batches * spatial[0] + query[:, :, 0]) * spatial[1] + query[:, :, 1]) * spatial[2] + query[:, :, 2]
+    positions = torch.searchsorted(sorted_keys, query_keys.flatten())
+    safe = positions.clamp_max(sorted_keys.numel() - 1)
+    found = positions.lt(sorted_keys.numel()) & sorted_keys[safe].eq(query_keys.flatten())
+    return (valid.flatten() & found).view(output_coords.size(0), 9)
+
+
+def kernel9_latency(module, input_tensor, runtime, repeats):
+    fn = (
+        _C.gtsparse_kernel9_fp16_forward
+        if sparse_features(input_tensor).dtype == torch.float16
+        else _C.gtsparse_kernel9_fp32_forward
+    )
+    events = []
+    for _ in range(int(repeats)):
+        start = torch.cuda.Event(enable_timing=True)
+        end = torch.cuda.Event(enable_timing=True)
+        start.record()
+        fn(
+            sparse_features(input_tensor),
+            module._runtime_weight(),
+            runtime.out_rows,
+            runtime.input_rows_w1,
+            runtime.input_rows_w4,
+            runtime.input_rows_w7,
+            runtime.input_rows_w9,
             runtime.template_ids,
             runtime.input_row_offsets,
             runtime.out_coords.size(0),
@@ -221,6 +279,11 @@ def print_summary(result):
                 f"  native split: builder={layer['builder_latency_median_ms']:.5f} ms, "
                 f"kernel={layer['kernel_latency_median_ms']:.5f} ms"
             )
+        if "template_width_mean" in layer:
+            print(
+                f"  template width: {layer['template_width_mean']:.5f}; "
+                f"counts={layer['template_counts']}"
+            )
         print(
             f"  active width: {layer['active_width_mean']:.5f} / "
             f"{math.prod(layer['kernel_size'])}; masks={len(layer['mask_histogram'])}"
@@ -273,6 +336,10 @@ def main():
         if module.__module__.endswith(".kernel3"):
             runtime, _ = module.build_runtime(input_tensor)
             summary = kernel3_mask_summary(runtime)
+        elif module.__module__.endswith(".kernel9"):
+            runtime, _ = module.build_runtime(input_tensor)
+            active = kernel9_active_map(module, input_tensor, output_tensor)
+            summary = mask_summary(active)
         elif module.__module__.startswith("torchsparse"):
             active = torchsparse_active_map(module, input_tensor)
             summary = mask_summary(active)
@@ -292,6 +359,16 @@ def main():
             kernel_ms = kernel3_latency(module, input_tensor, runtime, args.repeats)
             layer["kernel_latency_median_ms"] = kernel_ms
             layer["builder_latency_median_ms"] = layer["latency_median_ms"] - kernel_ms
+        elif module.__module__.endswith(".kernel9"):
+            kernel_ms = kernel9_latency(module, input_tensor, runtime, args.repeats)
+            counts = runtime.template_counts.cpu().tolist()
+            widths = (1, 4, 3, 4, 6, 7, 6, 9)
+            layer["kernel_latency_median_ms"] = kernel_ms
+            layer["builder_latency_median_ms"] = layer["latency_median_ms"] - kernel_ms
+            layer["template_counts"] = counts
+            layer["template_width_mean"] = sum(
+                count * width for count, width in zip(counts, widths)
+            ) / sum(counts)
         layers.append(layer)
 
     for handle in handles:

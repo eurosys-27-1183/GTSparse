@@ -6,6 +6,7 @@ void register_gtsparse3d_finalize_row_template_center_last_build_runtime_from_de
 void register_gtsparse3d_finalize_row_template_center_last_build_reverse_runtime_cuda(pybind11::module &m);
 void register_gtsparse3d_finalize_row_template_center_last_build_reverse_from_full_runtime_cuda(pybind11::module &m);
 void register_gtsparse_kernel3_cuda(pybind11::module &m);
+void register_gtsparse_kernel9_cuda(pybind11::module &m);
 
 
 PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
@@ -16,4 +17,5 @@ PYBIND11_MODULE(TORCH_EXTENSION_NAME, m) {
     register_gtsparse3d_finalize_row_template_center_last_build_reverse_runtime_cuda(m);
     register_gtsparse3d_finalize_row_template_center_last_build_reverse_from_full_runtime_cuda(m);
     register_gtsparse_kernel3_cuda(m);
+    register_gtsparse_kernel9_cuda(m);
 }

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from .metadata import GeometricTemplateMetadata, GeometricTemplateReverseEdge, empty_metadata, ensure_metadata
 from .kernel3 import GeometricTemplateKernel3Conv3d, Kernel3Runtime
+from .kernel9 import GeometricTemplateKernel9Conv3d, Kernel9Runtime
 from .modules import (
     GeometricTemplateSparseConv3d,
     GeometricTemplateSparseInverseConv3d,
@@ -25,9 +26,11 @@ __all__ = [
     "BM",
     "GeometricTemplateMetadata",
     "GeometricTemplateKernel3Conv3d",
+    "GeometricTemplateKernel9Conv3d",
     "GeometricTemplateReverseEdge",
     "GeometricTemplateRuntime",
     "Kernel3Runtime",
+    "Kernel9Runtime",
     "GeometricTemplateSparseConv3d",
     "GeometricTemplateSparseInverseConv3d",
     "GeometricTemplateSparseSequential",
