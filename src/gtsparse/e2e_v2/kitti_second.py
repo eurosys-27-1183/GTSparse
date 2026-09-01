@@ -24,7 +24,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 torchsparse.backends.allow_tf32 = False
 
-from .common import measure_cuda_elapsed_ms, require_cuda_device, resolve_runtime_dtype
+from .common import clear_sparse_metadata, measure_cuda_elapsed_ms, require_cuda_device, resolve_runtime_dtype
 from gtsparse.sparse3d.geometric_template import (
     GeometricTemplateKernel3Conv3d,
     GeometricTemplateSparseConv3d,
@@ -1533,42 +1533,31 @@ def _measure_frame_timings(
     resolved_device = require_cuda_device(device)
     runtime_dtype = next(model.parameters()).dtype
     conv_only_fn = model.forward_sparse_convolutions
+    clear_metadata = lambda: clear_sparse_metadata(model.backend)
+
     warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     with torch.no_grad():
         for _ in range(max(0, int(warmup))):
             batch = next(warmup_device_batches, None)
             if batch is None:
                 break
-            voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
-            conv_only_fn(voxel_features, voxel_coords, batch_size)
             model(batch)
-        torch.cuda.synchronize(device=resolved_device)
+            torch.cuda.synchronize(device=resolved_device)
+            clear_metadata()
 
     results = []
     device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
-    measured_batches = tqdm(device_batches, total=len(loader), desc=progress_desc, dynamic_ncols=True)
+    measured_batches = tqdm(device_batches, total=len(loader), desc=f"{progress_desc}/full", dynamic_ncols=True)
     with torch.no_grad():
         for batch_index, batch in enumerate(measured_batches):
-            voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
-            # Measure the full path first so end2end is not helped by a hotter
-            # sparse-backbone state than conv_only.
             predictions, end2end_ms = measure_cuda_elapsed_ms(
                 model,
                 batch,
                 device=resolved_device,
                 repeats=local_measure_repeats,
                 warmup_repeats=local_measure_warmup_repeats,
+                clear_metadata=clear_metadata,
             )
-            sparse_output, conv_only_ms = measure_cuda_elapsed_ms(
-                conv_only_fn,
-                voxel_features,
-                voxel_coords,
-                batch_size,
-                device=resolved_device,
-                repeats=local_measure_repeats,
-                warmup_repeats=local_measure_warmup_repeats,
-            )
-            encoded_stride = int(getattr(sparse_output, "encoded_stride", getattr(model.config.model, "anchor_feature_map_stride", 8)))
             topk_preds = model.postprocess_topk(predictions, topk=int(topk))
             nms_preds = model.postprocess_nms(
                 predictions,
@@ -1579,15 +1568,45 @@ def _measure_frame_timings(
             record = {
                 "batch_index": int(batch_index),
                 "frame_ids": list(batch.frame_ids),
-                "conv_only_ms": float(conv_only_ms),
                 "end2end_ms": float(end2end_ms),
-                "encoded_stride": encoded_stride,
                 "topk_count": int(topk_preds[0]["pred_scores"].numel()) if topk_preds else 0,
                 "nms_count": int(nms_preds[0]["pred_scores"].numel()) if nms_preds else 0,
                 "timing_repeats": int(local_measure_repeats),
                 "timing_warmup_repeats": int(local_measure_warmup_repeats),
             }
             results.append(record)
+
+    warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
+    with torch.no_grad():
+        for _ in range(max(0, int(warmup))):
+            batch = next(warmup_device_batches, None)
+            if batch is None:
+                break
+            voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
+            conv_only_fn(voxel_features, voxel_coords, batch_size)
+            torch.cuda.synchronize(device=resolved_device)
+            clear_metadata()
+
+    device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
+    measured_batches = tqdm(device_batches, total=len(loader), desc=f"{progress_desc}/conv", dynamic_ncols=True)
+    with torch.no_grad():
+        for batch_index, batch in enumerate(measured_batches):
+            record = results[batch_index]
+            if list(batch.frame_ids) != record["frame_ids"]:
+                raise RuntimeError("full and conv-only passes visited different frames")
+            voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
+            sparse_output, conv_only_ms = measure_cuda_elapsed_ms(
+                conv_only_fn,
+                voxel_features,
+                voxel_coords,
+                batch_size,
+                device=resolved_device,
+                repeats=local_measure_repeats,
+                warmup_repeats=local_measure_warmup_repeats,
+                clear_metadata=clear_metadata,
+            )
+            record["conv_only_ms"] = float(conv_only_ms)
+            record["encoded_stride"] = int(getattr(sparse_output, "encoded_stride", getattr(model.config.model, "anchor_feature_map_stride", 8)))
             if on_result is not None:
                 on_result(record)
     return results

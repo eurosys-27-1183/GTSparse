@@ -22,7 +22,7 @@ torch.backends.cuda.matmul.allow_tf32 = False
 torch.backends.cudnn.allow_tf32 = False
 torchsparse.backends.allow_tf32 = False
 
-from gtsparse.e2e_v2.common import require_cuda_device, resolve_runtime_dtype
+from gtsparse.e2e_v2.common import clear_sparse_metadata, measure_cuda_elapsed_ms, require_cuda_device, resolve_runtime_dtype
 from gtsparse.sparse3d.geometric_template import (
     GeometricTemplateKernel8Conv3d,
     GeometricTemplateKernel8InverseConv3d,
@@ -1129,7 +1129,9 @@ def _measure_frame_timings(
 ):
     resolved_device = require_cuda_device(device)
     runtime_dtype = next(model.parameters()).dtype
-    from .kitti_second import _iter_device_batches, measure_cuda_elapsed_ms
+    from .kitti_second import _iter_device_batches
+
+    clear_metadata = lambda: clear_sparse_metadata(model.backend)
 
     warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     with torch.no_grad():
@@ -1137,10 +1139,9 @@ def _measure_frame_timings(
             batch = next(warmup_device_batches, None)
             if batch is None:
                 break
-            voxel_features, voxel_coords, batch_size = model.encode_batch(batch)
-            model.forward_sparse_backbone(voxel_features, voxel_coords, batch_size)
             model(batch)
-        torch.cuda.synchronize(device=resolved_device)
+            torch.cuda.synchronize(device=resolved_device)
+            clear_metadata()
     results = []
     device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     measured_batches = tqdm(
@@ -1157,6 +1158,7 @@ def _measure_frame_timings(
                 device=resolved_device,
                 repeats=max(1, int(timing_repeats)),
                 warmup_repeats=max(0, int(timing_warmup_repeats)),
+                clear_metadata=clear_metadata,
             )
             record = {
                 "batch_index": int(batch_index),
