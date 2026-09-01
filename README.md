@@ -1,6 +1,4 @@
-# GTSparse: A Geometric-Template-Driven Sparse Convolution Runtime on GPUs
-
-## Artifact Evaluation
+# GTSparse: A Geometric-Template-Driven Sparse Convolution Runtime on GPUs (Artifact Evaluation)
 
 ## Dataset Preparation
 
@@ -27,6 +25,7 @@ dataset
     └── dataset
         └── sequences
 ```
+
 ## Installation
 
 The artifact uses Python 3.10, PyTorch 2.1.2, and CUDA Toolkit 12.1. Clone the baseline submodules before installation:
@@ -94,16 +93,6 @@ bash run_artifact.sh --all
 - `--sensitivity` runs the sweep-sensitivity experiments.
 - `--plots` aggregates existing logs and regenerates the result tables and figures without running GPU experiments.
 - `--all` runs every experiment category and then generates all result tables and figures.
-
-The common optional parameters are:
-
-- `--frames N` controls the number of frames for end-to-end, template-profile, ablation, and sensitivity experiments. The default `0` uses the complete dataset split.
-- `--micro-frames N` controls sampled timing, profiling, and breakdown measurements; the default is `100`.
-- `--memory-frames N` controls peak-memory measurements; the default is `20`.
-- `--warmup N` sets the number of global warmup frames; the default is `20`.
-- `--timing-repeats N` sets the measured repetitions per frame; the median is recorded and the default is `3`.
-- `--device DEVICE` selects the CUDA device; the default is `cuda:0`.
-- `--overwrite` replaces completed outputs instead of reusing them.
 
 Every GPU experiment displays a tqdm progress bar with the total, percentage, and ETA. Completed results are reused by default.
 

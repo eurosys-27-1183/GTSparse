@@ -102,6 +102,34 @@ def profile_rows(root: Path):
     return profiles, raw_by_key, spconv_by_key
 
 
+def timing_rows(root: Path):
+    """Return per-frame conv-only timings keyed by backend and workload.
+
+    Throughput is an aggregate over the same frames as the FLOP profile.  The
+    timing summary's median is useful for latency tables, but pairing each
+    profile record with its frame timing lets the throughput numerator and
+    denominator use one consistent sample and avoids mixing mean and median
+    statistics.
+    """
+    timings = {}
+    timing_root = root / "microbenchmark" / "timing"
+    for summary_path in sorted(timing_root.glob("logs_*/*.summary.json")):
+        summary = json.loads(summary_path.read_text(encoding="utf-8"))
+        path = summary_path.with_name(summary_path.name.replace(".summary.json", ".jsonl"))
+        if not path.exists():
+            continue
+        records = read_jsonl(path)
+        if not records:
+            continue
+        key = (summary["gpu"], summary["workload"], summary["backend"], summary["dtype"])
+        timings[key] = {
+            tuple(record["frame_ids"]): float(record["conv_only_ms"])
+            for record in records
+            if "conv_only_ms" in record and record.get("frame_ids")
+        }
+    return timings
+
+
 def spconv_issued_flops(profile_record, spconv_record) -> int:
     issued = 0
     if len(profile_record["layers"]) != len(spconv_record["layers"]):
@@ -128,7 +156,7 @@ def torchsparse_issued_flops(profile_record, spconv_record) -> int:
     return issued
 
 
-def throughput_rows(summary, raw_profiles, spconv_profiles):
+def throughput_rows(summary, raw_profiles, spconv_profiles, frame_timings=None):
     rows = []
     issued_key = {
         "gtsparse": "gtsparse_issued_flops",
@@ -142,30 +170,46 @@ def throughput_rows(summary, raw_profiles, spconv_profiles):
         if not records:
             continue
         backend = timing["backend"]
-        effective = statistics.mean(record["effective_flops"] for record in records)
+        timing_by_frame = None
+        if frame_timings is not None:
+            timing_by_frame = frame_timings.get((timing["gpu"], timing["workload"], backend, timing["dtype"]))
+            if not timing_by_frame:
+                continue
+            missing = [tuple(record["frame_ids"]) for record in records if tuple(record["frame_ids"]) not in timing_by_frame]
+            if missing:
+                raise ValueError(
+                    f"throughput profile/timing frame mismatch for {timing['gpu']} "
+                    f"{timing['workload']} {backend}: {len(missing)} profile frames have no timing"
+                )
+            elapsed_ms = sum(timing_by_frame[tuple(record["frame_ids"])] for record in records)
+            effective = sum(record["effective_flops"] for record in records)
+        else:
+            # Backward-compatible path for callers that only have summaries.
+            elapsed_ms = float(timing["median_ms"]) * len(records)
+            effective = statistics.mean(record["effective_flops"] for record in records) * len(records)
         if backend == "spconv":
             spconv_records = spconv_profiles.get(key)
             if not spconv_records:
                 continue
             by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
-            issued = statistics.mean(spconv_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records)
+            issued_values = [spconv_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records]
         elif backend == "torchsparse":
             spconv_records = spconv_profiles.get(key)
             if not spconv_records:
                 continue
             by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
-            issued = statistics.mean(torchsparse_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records)
+            issued_values = [torchsparse_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records]
         else:
-            issued = statistics.mean(record[issued_key[backend]] for record in records)
-        median_ms = float(timing["median_ms"])
+            issued_values = [record[issued_key[backend]] for record in records]
+        issued = sum(issued_values)
         rows.append(
             {
                 "backend": backend,
                 "dtype": timing["dtype"],
-                "effective_tflops": effective / median_ms / 1e9,
+                "effective_tflops": effective / elapsed_ms / 1e9,
                 "gpu": timing["gpu"],
                 "proportionality_percent": 100 * effective / issued,
-                "raw_tflops": issued / median_ms / 1e9,
+                "raw_tflops": issued / elapsed_ms / 1e9,
                 "workload": timing["workload"],
             }
         )
@@ -254,7 +298,8 @@ def main() -> None:
     args = parse_args()
     summaries, per_frame = summary_rows(args.logs)
     profiles, raw_profiles, spconv_profiles = profile_rows(args.logs)
-    throughput = throughput_rows(summaries, raw_profiles, spconv_profiles)
+    frame_timings = timing_rows(args.logs)
+    throughput = throughput_rows(summaries, raw_profiles, spconv_profiles, frame_timings)
     breakdown = breakdown_rows(args.logs, summaries)
     memory = memory_rows(args.logs)
 
