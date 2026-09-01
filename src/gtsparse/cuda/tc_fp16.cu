@@ -11,7 +11,6 @@ namespace {
 
 using namespace gtsparse_row_template_center_last;
 using CenterLastFP16Params = FinalizeRowTemplateCenterLastFP16Params;
-constexpr int kTiledCtasPerSM = 8;
 
 struct CenterLastFP16Setting1Cfg {
     static constexpr int BM = 128;
@@ -38,16 +37,6 @@ struct CenterLastFP16Setting3Cfg {
     static constexpr int THREADS = 128;
     static constexpr int A_SHARED_SIZE = 5120;
     static constexpr int B_SHARED_SIZE = 2304;
-};
-
-template <int MTiles, int NPairs>
-struct CenterLastFP16TiledCfg {
-    static constexpr int BM = 32 * MTiles;
-    static constexpr int BN = 16 * NPairs;
-    static constexpr int BK = 32;
-    static constexpr int THREADS = 64;
-    static constexpr int A_SHARED_SIZE = 1280 * MTiles;
-    static constexpr int B_SHARED_SIZE = 1280 * NPairs;
 };
 
 template <int bytes>
@@ -704,8 +693,7 @@ __device__ __forceinline__ void center_last_fp16_setting3_sorted_tile(
     }
 }
 
-template <int MTiles, int NPairs>
-__device__ __forceinline__ void center_last_fp16_tiled_tile(
+__device__ __forceinline__ void center_last_fp16_setting2_tile(
     const CenterLastFP16Params& p,
     int template_id,
     int out_row_base,
@@ -714,6 +702,8 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
     half* A_shared,
     half* B_shared) {
     constexpr int KTile = 32;
+    constexpr int MTiles = 4;
+
     const int tid = threadIdx.x;
     const int thread_x = tid & 31;
     const int thread_y = tid >> 5;
@@ -725,11 +715,11 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
     const int row_pitch = payload_width * 16;
     const int logical_stride = Cin * Cout;
 
-    float C_warp[8 * MTiles * NPairs];
-    half A_shared_warp[8 * MTiles];
-    half B_shared_warp[8 * NPairs];
+    float C_warp[32];
+    half A_shared_warp[32];
+    half B_shared_warp[8];
     #pragma unroll
-    for (int i = 0; i < 8 * MTiles * NPairs; ++i) {
+    for (int i = 0; i < 32; ++i) {
         C_warp[i] = 0.0f;
     }
 
@@ -743,7 +733,7 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
         + (thread_y * 16 + thread_x / 2) * Cout
         + ((thread_x * 8) % 16);
     const half* A_ptr = p.features + ((thread_x * 8) % KTile);
-    const int reorder_loc_offset = (thread_y % 2) * MTiles * 16 + (thread_x / 4);
+    const int reorder_loc_offset = (thread_y % 2) * 64 + (thread_x / 4);
     const int c_lane_base = bn_base + (thread_x % 4) * 2;
 
     const int total_k_loops = slot_count * loops_per_slot;
@@ -757,7 +747,7 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
 
         __syncthreads();
         #pragma unroll
-        for (int ax = 0; ax < 2 * MTiles; ++ax) {
+        for (int ax = 0; ax < 8; ++ax) {
             half* dst =
                 A_shared
                 + ax * 640
@@ -773,29 +763,24 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
             }
         }
 
-        #pragma unroll
-        for (int n_pair = 0; n_pair < NPairs; ++n_pair) {
-            half* dst =
-                B_shared
-                + n_pair * 1280
-                + thread_y * 640
-                + (thread_x >> 1) * 40
-                + (thread_x & 1) * 8;
-            *reinterpret_cast<uint4*>(dst) =
-                *reinterpret_cast<const uint4*>(B_ptr_local + n_pair * 16);
-        }
+        half* dst =
+            B_shared
+            + thread_y * 640
+            + (thread_x >> 1) * 40
+            + (thread_x & 1) * 8;
+        *reinterpret_cast<uint4*>(dst) = *reinterpret_cast<const uint4*>(B_ptr_local);
         __syncthreads();
 
         #pragma unroll
         for (int i2_0_1 = 0; i2_0_1 < 2; ++i2_0_1) {
             #pragma unroll
-            for (int ax0_0 = 0; ax0_0 < MTiles; ++ax0_0) {
+            for (int ax0_0 = 0; ax0_0 < 4; ++ax0_0) {
                 unsigned int addr;
                 __asm__ __volatile__(
                     "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }"
                     : "=r"(addr)
                     : "l"((void*)(
-                        (A_shared + ((thread_y & 1) * MTiles * 640 + ax0_0 * 640 + i2_0_1 * 16))
+                        (A_shared + ((thread_y & 1) * 2560 + ax0_0 * 640 + i2_0_1 * 16))
                         + ((thread_x & 15) * 40 + (thread_x >> 4) * 8))));
 #if __CUDA_ARCH__ >= 750
                 __asm__ __volatile__(
@@ -809,35 +794,30 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
 #endif
             }
 
-            #pragma unroll
-            for (int n_pair = 0; n_pair < NPairs; ++n_pair) {
+            {
                 unsigned int addr;
                 __asm__ __volatile__(
                     "{ .reg .u64 addr; cvta.to.shared.u64 addr, %1; cvt.u32.u64 %0, addr; }"
                     : "=r"(addr)
-                    : "l"((void*)((B_shared + n_pair * 1280 + i2_0_1 * 640)
-                                  + ((thread_x & 15) * 40 + (thread_x >> 4) * 8))));
+                    : "l"((void*)((B_shared + i2_0_1 * 640) + ((thread_x & 15) * 40 + (thread_x >> 4) * 8))));
 #if __CUDA_ARCH__ >= 750
                 __asm__ __volatile__(
                     "ldmatrix.sync.aligned.m8n8.x4.trans.shared.b16"
                     "{%0, %1, %2, %3}, [%4];"
-                    : "=r"(((unsigned*)(B_shared_warp + n_pair * 8))[0]),
-                      "=r"(((unsigned*)(B_shared_warp + n_pair * 8))[1]),
-                      "=r"(((unsigned*)(B_shared_warp + n_pair * 8))[2]),
-                      "=r"(((unsigned*)(B_shared_warp + n_pair * 8))[3])
+                    : "=r"(((unsigned*)(B_shared_warp + 0))[0]),
+                      "=r"(((unsigned*)(B_shared_warp + 0))[1]),
+                      "=r"(((unsigned*)(B_shared_warp + 0))[2]),
+                      "=r"(((unsigned*)(B_shared_warp + 0))[3])
                     : "r"(addr));
 #endif
             }
 
             #pragma unroll
             for (int i0_0_3 = 0; i0_0_3 < MTiles; ++i0_0_3) {
-                #pragma unroll
-                for (int n_pair = 0; n_pair < NPairs; ++n_pair) {
-                    tc_mma_m16n8k16(
-                        C_warp + (i0_0_3 * NPairs + n_pair) * 8,
-                        A_shared_warp + i0_0_3 * 8,
-                        B_shared_warp + n_pair * 8);
-                }
+                tc_mma_m16n8k16(
+                    C_warp + i0_0_3 * 8,
+                    A_shared_warp + i0_0_3 * 8,
+                    B_shared_warp);
             }
         }
 
@@ -861,21 +841,17 @@ __device__ __forceinline__ void center_last_fp16_tiled_tile(
     for (int ax0_0_1 = 0; ax0_0_1 < MTiles; ++ax0_0_1) {
         const int reorder_loc_offset_local = reorder_loc_offset + ax0_0_1 * 16;
         #pragma unroll
-        for (int n_pair = 0; n_pair < NPairs; ++n_pair) {
-            #pragma unroll
-            for (int local_id = 0; local_id < 8; ++local_id) {
-                const int row_local = reorder_loc_offset_local + (((local_id / 2) % 2) * 8);
-                const int out_row = p.out_rows[out_row_base + row_local];
-                if (out_row < 0) {
-                    continue;
-                }
-                const int col = c_lane_base + n_pair * 16 + (local_id % 2) + (local_id / 4) * 8;
-                if (col >= Cout) {
-                    continue;
-                }
-                p.output[out_row * Cout + col] =
-                    __float2half(C_warp[(ax0_0_1 * NPairs + n_pair) * 8 + local_id]);
+        for (int local_id = 0; local_id < 8; ++local_id) {
+            const int row_local = reorder_loc_offset_local + (((local_id / 2) % 2) * 8);
+            const int out_row = p.out_rows[out_row_base + row_local];
+            if (out_row < 0) {
+                continue;
             }
+            const int col = c_lane_base + (local_id % 2) + (local_id / 4) * 8;
+            if (col >= Cout) {
+                continue;
+            }
+            p.output[out_row * Cout + col] = __float2half(C_warp[ax0_0_1 * 8 + local_id]);
         }
     }
 }
@@ -1522,23 +1498,20 @@ __global__ void __launch_bounds__(CenterLastFP16Setting3Cfg::THREADS, 4) center_
         &slot_active_shared);
 }
 
-template <int MTiles, int NPairs>
-__global__ void __launch_bounds__(64) center_last_fp16_tiled_kernel(CenterLastFP16Params p) {
-    using Cfg = CenterLastFP16TiledCfg<MTiles, NPairs>;
-    __shared__ half A_shared[Cfg::A_SHARED_SIZE];
-    __shared__ half B_shared[Cfg::B_SHARED_SIZE];
-    const int gnt = (p.c_out + Cfg::BN - 1) / Cfg::BN;
+__global__ void __launch_bounds__(CenterLastFP16Setting2Cfg::THREADS) center_last_fp16_setting2_kernel(CenterLastFP16Params p) {
+    __shared__ half A_shared[CenterLastFP16Setting2Cfg::A_SHARED_SIZE];
+    __shared__ half B_shared[CenterLastFP16Setting2Cfg::B_SHARED_SIZE];
+    const int gnt = (p.c_out + CenterLastFP16Setting2Cfg::BN - 1) / CenterLastFP16Setting2Cfg::BN;
     const int logical = static_cast<int>(blockIdx.x);
     const int row_tile = logical / gnt;
-    const int out_row_base = row_tile * Cfg::BM;
-    const int bn_base = (logical % gnt) * Cfg::BN;
+    const int out_row_base = row_tile * CenterLastFP16Setting2Cfg::BM;
+    const int bn_base = (logical % gnt) * CenterLastFP16Setting2Cfg::BN;
     const int template_id = p.template_ids[out_row_base];
     if (template_id < 0) {
         return;
     }
     const int input_row_offset = p.input_row_offsets[out_row_base];
-    center_last_fp16_tiled_tile<MTiles, NPairs>(
-        p, template_id, out_row_base, input_row_offset, bn_base, A_shared, B_shared);
+    center_last_fp16_setting2_tile(p, template_id, out_row_base, input_row_offset, bn_base, A_shared, B_shared);
 }
 
 __global__ void __launch_bounds__(CenterLastFP16Setting2Cfg::THREADS) center_last_fp16_setting2_sorted_kernel(CenterLastFP16Params p) {
@@ -1799,17 +1772,10 @@ static void launch_center_last_fp16_setting1_sorted_variant(CenterLastFP16Params
         at::cuda::getCurrentCUDAStream()>>>(p);
 }
 
-template <int MTiles, int NPairs>
-static void launch_center_last_fp16_tiled(CenterLastFP16Params p) {
-    using Cfg = CenterLastFP16TiledCfg<MTiles, NPairs>;
-    const int gnt = (p.c_out + Cfg::BN - 1) / Cfg::BN;
-    const int grid = (p.padded_rows / Cfg::BM) * gnt;
-    center_last_fp16_tiled_kernel<MTiles, NPairs><<<
-        grid, Cfg::THREADS, 0, at::cuda::getCurrentCUDAStream()>>>(p);
-}
-
 static void launch_center_last_fp16_setting2(CenterLastFP16Params p) {
-    launch_center_last_fp16_tiled<4, 1>(p);
+    const int gnt = (p.c_out + CenterLastFP16Setting2Cfg::BN - 1) / CenterLastFP16Setting2Cfg::BN;
+    const int grid = (p.padded_rows / CenterLastFP16Setting2Cfg::BM) * gnt;
+    center_last_fp16_setting2_kernel<<<grid, CenterLastFP16Setting2Cfg::THREADS, 0, at::cuda::getCurrentCUDAStream()>>>(p);
 }
 
 static void launch_center_last_fp16_setting2_sorted(CenterLastFP16Params p) {
@@ -2164,35 +2130,6 @@ torch::Tensor finalize_row_template_center_last_fp16_setting3_sorted_forward(
         &launch_center_last_fp16_setting3_sorted);
 }
 
-template <int MTiles, int NPairs>
-static torch::Tensor center_last_fp16_tiled_forward(
-    const torch::Tensor& features,
-    const torch::Tensor& logical_weight,
-    const torch::Tensor& out_rows,
-    const torch::Tensor& input_rows_w1,
-    const torch::Tensor& input_rows_w9,
-    const torch::Tensor& input_rows_w18,
-    const torch::Tensor& input_rows_w27,
-    const torch::Tensor& template_ids,
-    const torch::Tensor& input_row_offsets,
-    int64_t n_out) {
-    using Cfg = CenterLastFP16TiledCfg<MTiles, NPairs>;
-    return center_last_fp16_forward_common<Cfg>(
-        features,
-        logical_weight,
-        out_rows,
-        input_rows_w1,
-        input_rows_w9,
-        input_rows_w18,
-        input_rows_w27,
-        template_ids,
-        input_row_offsets,
-        n_out,
-        true,
-        true,
-        &launch_center_last_fp16_tiled<MTiles, NPairs>);
-}
-
 torch::Tensor finalize_row_template_center_last_fp16_forward(
     torch::Tensor features,
     torch::Tensor logical_weight,
@@ -2206,23 +2143,6 @@ torch::Tensor finalize_row_template_center_last_fp16_forward(
     int64_t n_out) {
     const int Cin = static_cast<int>(features.size(1));
     const int Cout = static_cast<int>(logical_weight.size(1));
-    if (Cin % 32 == 0 && Cout % 32 == 0) {
-        const int sm_count = at::cuda::getCurrentDeviceProperties()->multiProcessorCount;
-        const int64_t useful_ctas = ((n_out + 63) / 64) * ((Cout + 31) / 32);
-        if (Cout % 64 != 0 || Cin != Cout || useful_ctas < int64_t(kTiledCtasPerSM) * sm_count) {
-            return center_last_fp16_tiled_forward<2, 2>(
-                features,
-                logical_weight,
-                out_rows,
-                input_rows_w1,
-                input_rows_w9,
-                input_rows_w18,
-                input_rows_w27,
-                template_ids,
-                input_row_offsets,
-                n_out);
-        }
-    }
     if (Cin % 32 == 0 && Cout % 64 == 0) {
         return finalize_row_template_center_last_fp16_setting3_forward(
             features,
