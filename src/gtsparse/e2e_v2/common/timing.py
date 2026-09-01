@@ -33,8 +33,9 @@ def measure_cuda_elapsed_ms(
         torch.cuda.synchronize(device=device)
         if clear_metadata is not None:
             clear_metadata()
+        out = None
     times = []
-    for _ in range(repeat_count):
+    for repeat_index in range(repeat_count):
         start = torch.cuda.Event(enable_timing=True)
         end = torch.cuda.Event(enable_timing=True)
         start.record()
@@ -44,4 +45,6 @@ def measure_cuda_elapsed_ms(
         times.append(float(start.elapsed_time(end)))
         if clear_metadata is not None:
             clear_metadata()
+        if repeat_index + 1 < repeat_count:
+            out = None
     return out, float(statistics.median(times))

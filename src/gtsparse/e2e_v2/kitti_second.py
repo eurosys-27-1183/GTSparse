@@ -1575,6 +1575,7 @@ def _measure_frame_timings(
                 "timing_warmup_repeats": int(local_measure_warmup_repeats),
             }
             results.append(record)
+            del predictions, topk_preds, nms_preds
 
     warmup_device_batches = _iter_device_batches(loader, device, dtype=runtime_dtype)
     with torch.no_grad():
@@ -1609,6 +1610,7 @@ def _measure_frame_timings(
             record["encoded_stride"] = int(getattr(sparse_output, "encoded_stride", getattr(model.config.model, "anchor_feature_map_stride", 8)))
             if on_result is not None:
                 on_result(record)
+            del sparse_output
     return results
 
 

@@ -1172,6 +1172,7 @@ def _measure_frame_timings(
             results.append(record)
             if on_result is not None:
                 on_result(record)
+            del predictions
     return results
 
 
