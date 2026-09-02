@@ -7,6 +7,7 @@ You would need to download KITTI, NuScenes, and SemanticKITTI datasets. Links:
  - [NuScenes](https://www.nuscenes.org/nuscenes)
  - [SemanticKITTI](http://semantic-kitti.org/)
 
+
 These datasets should be organized as follows (create a `dataset` directory and place the datasets in it):
 
 ```
@@ -25,10 +26,17 @@ dataset
     └── dataset
         └── sequences
 ```
+For convenience, we also provide a temporary [OneDrive mirror of `dataset.tar`](https://1drv.ms/u/c/b44f55aa07e438ba/IQBItnLwoagRRrxZpzJcAUD2ATdWtIAN4VN5IeREuDytnn4?e=RkpLuy), an archive containing all three prepared datasets: KITTI, NuScenes, and SemanticKITTI. Download the archive to the repository root and extract it with:
+
+```bash
+tar -xf dataset.tar
+```
+
+The archive extracts directly to `dataset/`. Users are responsible for complying with the original licenses of KITTI, NuScenes, and SemanticKITTI.
 
 ## Installation
 
-The artifact uses Python 3.10, PyTorch 2.1.2, and CUDA Toolkit 12.1. Clone the baseline submodules before installation:
+The artifact uses Python 3.10, PyTorch 2.1.2, and CUDA Toolkit 12.1. Clone the baseline submodules and install all the baselines:
 
 ```bash
 git submodule update --init --recursive
@@ -91,12 +99,19 @@ bash run_artifact.sh --all
 - `--microbenchmark` generates the template, throughput, breakdown, stability, and memory measurements.
 - `--ablation` runs the template-family ablation.
 - `--sensitivity` runs the sweep-sensitivity experiments.
-- `--plots` aggregates existing logs and regenerates the result tables and figures without running GPU experiments.
+- `--plots` aggregates existing logs and regenerates the result tables and figures without running GPU experiments or requiring a CUDA device.
 - `--all` runs every experiment category and then generates all result tables and figures.
 
 Every GPU experiment displays a tqdm progress bar with the total, percentage, and ETA. Completed results are reused by default.
 
 ### Outputs and Paper Reproduction
+
+The complete reference logs collected on our NVIDIA GeForce RTX 3080 are available in the [`artifact-logs-rtx3080-v1` release](https://github.com/eurosys-27-1183/GTSparse/releases/tag/artifact-logs-rtx3080-v1). From the repository root, download and extract the logs, then regenerate all result tables and figures with:
+
+```bash
+curl -fL https://github.com/eurosys-27-1183/GTSparse/releases/download/artifact-logs-rtx3080-v1/gtsparse-artifact-logs-rtx3080.tar.gz -o gtsparse-artifact-logs-rtx3080.tar.gz && tar -xzf gtsparse-artifact-logs-rtx3080.tar.gz
+bash run_artifact.sh --plots
+```
 
 The complete artifact evaluation, including all measurements, result tables, and paper figures, can be reproduced with one command:
 
@@ -113,4 +128,4 @@ bash run_artifact.sh --ablation
 bash run_artifact.sh --sensitivity
 ```
 
-Raw measurements are written under `logs/`. Aggregated paper data is written as CSV files under `results/`, and the corresponding PDF tables and figures are written under `figures/`. After the measurements are available, `bash run_artifact.sh --plots` regenerates both `results/` and `figures/` directly from the raw logs.
+Raw measurements are written under `logs/`; microbenchmark cases are separated by GPU, dtype, and workload so measurements from multiple platforms can coexist. Aggregated paper data from all available platforms is written as CSV files under `results/`. The cross-platform end-to-end figure is written directly under `figures/`, while all platform-specific tables and figures are written under `figures/<gpu>/`. After the measurements are available, `bash run_artifact.sh --plots` regenerates both `results/` and `figures/` directly from the raw logs.

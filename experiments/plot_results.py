@@ -81,19 +81,23 @@ def short_gpu_name(gpu: str) -> str:
     return name.replace("_", " ")
 
 
-def preferred_gpu(rows) -> str:
-    """Choose the paper platform when present, otherwise a deterministic platform.
-
-    The paper's microbenchmark tables use one platform.  The artifact may have
-    logs for more than one platform, so table/one-platform plots must not mix
-    rows from different GPUs.  Prefer the paper order and fall back to the
-    first available name for development runs on other hardware.
-    """
+def single_gpu(rows) -> str:
+    """Return the only platform in a single-platform figure's input rows."""
     gpus = sorted({row["gpu"] for row in rows if row.get("gpu")})
     if not gpus:
         return ""
+    if len(gpus) != 1:
+        raise ValueError(f"single-platform plot received multiple GPUs: {gpus}")
+    return gpus[0]
+
+
+def gpu_path_name(gpu: str) -> str:
+    return "".join(character if character.isalnum() or character in "-_." else "_" for character in gpu).strip("_") or "unknown_gpu"
+
+
+def gpu_sort_key(gpu: str):
     paper_order = {name: index for index, name in enumerate(PAPER_PANEL_LABELS)}
-    return min(gpus, key=lambda gpu: (paper_order.get(short_gpu_name(gpu), len(paper_order)), short_gpu_name(gpu)))
+    return paper_order.get(short_gpu_name(gpu), len(paper_order)), short_gpu_name(gpu)
 
 
 def finite_value(value):
@@ -176,8 +180,7 @@ def plot_end_to_end(rows, figures: Path, dtype: str) -> None:
     if not gpus or not workloads:
         return
 
-    paper_order = {name: index for index, name in enumerate(PAPER_PANEL_LABELS)}
-    gpus.sort(key=lambda gpu: paper_order.get(short_gpu_name(gpu), len(paper_order)))
+    gpus.sort(key=gpu_sort_key)
     n_workloads = len(workloads)
     n_systems = len(BACKENDS)
     columns = 1 if len(gpus) == 1 else 2
@@ -368,7 +371,7 @@ def plot_end_to_end(rows, figures: Path, dtype: str) -> None:
 def plot_template_distribution(rows, figures: Path) -> None:
     if not rows:
         return
-    platform = preferred_gpu(rows)
+    platform = single_gpu(rows)
     if platform:
         rows = [row for row in rows if row.get("gpu") == platform]
     order = {name: index for index, name in enumerate(WORKLOAD_LABELS)}
@@ -410,7 +413,7 @@ def plot_template_distribution(rows, figures: Path) -> None:
 def plot_effective_throughput(rows, figures: Path) -> None:
     if not rows:
         return
-    platform = preferred_gpu(rows)
+    platform = single_gpu(rows)
     if platform:
         rows = [row for row in rows if row.get("gpu") == platform]
     workloads = sorted({row["workload"] for row in rows})
@@ -498,7 +501,7 @@ def plot_effective_throughput(rows, figures: Path) -> None:
 def plot_time_breakdown(rows, figures: Path) -> None:
     if not rows:
         return
-    platform = preferred_gpu(rows)
+    platform = single_gpu(rows)
     if platform:
         rows = [row for row in rows if row.get("gpu") == platform]
     workload_order = {name: index for index, name in enumerate(WORKLOAD_LABELS)}
@@ -544,7 +547,7 @@ def plot_time_breakdown(rows, figures: Path) -> None:
 
 
 def plot_peak_memory(rows, figures: Path) -> None:
-    platform = preferred_gpu(rows)
+    platform = single_gpu(rows)
     if platform:
         rows = [row for row in rows if row.get("gpu") == platform]
     workloads = sorted({row["workload"] for row in rows})
@@ -582,7 +585,7 @@ def plot_ablation(rows, figures: Path) -> None:
     rows = [row for row in rows if row["experiment"] == "ablation" and row["backend"] == "gtsparse" and row["metric"] == "conv_only"]
     if not rows:
         return
-    platform = preferred_gpu(rows)
+    platform = single_gpu(rows)
     if platform:
         rows = [row for row in rows if row.get("gpu") == platform]
     rows.sort(key=lambda row: int(row["min_template"]))
@@ -631,7 +634,7 @@ def plot_sensitivity(rows, figures: Path) -> None:
     rows = [row for row in rows if row["experiment"] == "sensitivity" and row["metric"] == "conv_only"]
     if not rows:
         return
-    gpu = preferred_gpu(rows)
+    gpu = single_gpu(rows)
     rows = [row for row in rows if row["gpu"] == gpu]
     sweeps = sorted({int(row["sweeps"]) for row in rows})
     fig, axis = plt.subplots(figsize=(2.4, 2.4))
@@ -685,7 +688,7 @@ def plot_per_frame(rows, figures: Path) -> None:
     rows = [row for row in rows if row["workload"] == target and row["metric"] == "conv_only"]
     if not rows:
         return
-    gpu = preferred_gpu(rows)
+    gpu = single_gpu(rows)
     rows = [row for row in rows if row.get("gpu") == gpu]
     fig, axis = plt.subplots(figsize=(5.5, 2.2))
     for backend in ("spconv", "torchsparse", "gtsparse"):
@@ -746,15 +749,32 @@ def parse_args():
 def main() -> None:
     args = parse_args()
     latency = read_csv(args.results / "latency.csv")
+    template_distribution = read_csv(args.results / "template_distribution.csv")
+    effective_throughput = read_csv(args.results / "effective_throughput.csv")
+    time_breakdown = read_csv(args.results / "time_breakdown.csv")
+    peak_memory = read_csv(args.results / "peak_memory.csv")
+    per_frame_latency = read_csv(args.results / "per_frame_latency.csv")
     plot_end_to_end(latency, args.figures, "fp16")
     plot_end_to_end(latency, args.figures, "fp32")
-    plot_template_distribution(read_csv(args.results / "template_distribution.csv"), args.figures)
-    plot_effective_throughput(read_csv(args.results / "effective_throughput.csv"), args.figures)
-    plot_time_breakdown(read_csv(args.results / "time_breakdown.csv"), args.figures)
-    plot_peak_memory(read_csv(args.results / "peak_memory.csv"), args.figures)
-    plot_ablation(latency, args.figures)
-    plot_sensitivity(latency, args.figures)
-    plot_per_frame(read_csv(args.results / "per_frame_latency.csv"), args.figures)
+    platform_rows = (
+        template_distribution,
+        effective_throughput,
+        time_breakdown,
+        peak_memory,
+        latency,
+        per_frame_latency,
+    )
+    gpus = sorted({row["gpu"] for rows in platform_rows for row in rows if row.get("gpu")}, key=gpu_sort_key)
+    for gpu in gpus:
+        figures = args.figures / gpu_path_name(gpu)
+        select = lambda rows: [row for row in rows if row.get("gpu") == gpu]
+        plot_template_distribution(select(template_distribution), figures)
+        plot_effective_throughput(select(effective_throughput), figures)
+        plot_time_breakdown(select(time_breakdown), figures)
+        plot_peak_memory(select(peak_memory), figures)
+        plot_ablation(select(latency), figures)
+        plot_sensitivity(select(latency), figures)
+        plot_per_frame(select(per_frame_latency), figures)
 
 
 if __name__ == "__main__":

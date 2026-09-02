@@ -19,6 +19,13 @@ def write_csv(path: Path, fieldnames, rows) -> None:
         writer.writerows(rows)
 
 
+def insert_unique(mapping, sources, key, value, path: Path, label: str) -> None:
+    if key in mapping:
+        raise ValueError(f"duplicate {label} for {key}: {sources[key]} and {path}")
+    mapping[key] = value
+    sources[key] = path
+
+
 def summary_rows(root: Path):
     rows = []
     per_frame = []
@@ -66,14 +73,17 @@ def summary_rows(root: Path):
 
 
 def profile_rows(root: Path):
-    profiles = []
+    profiles = {}
+    profile_sources = {}
     raw_by_key = {}
-    for path in sorted((root / "microbenchmark" / "profile").glob("*.jsonl")):
+    raw_sources = {}
+    for path in sorted((root / "microbenchmark" / "profile").rglob("*.jsonl")):
         records = read_jsonl(path)
         if not records:
             continue
-        raw_by_key[(records[0]["gpu"], records[0]["workload"])] = records
-    for path in sorted((root / "microbenchmark" / "template_profile").glob("*.jsonl")):
+        key = (records[0]["gpu"], records[0]["workload"])
+        insert_unique(raw_by_key, raw_sources, key, records, path, "workload profile")
+    for path in sorted((root / "microbenchmark" / "template_profile").rglob("*.jsonl")):
         records = read_jsonl(path)
         if not records:
             continue
@@ -93,13 +103,16 @@ def profile_rows(root: Path):
             "skip2_percent": 100 * counts[1] / total,
             "workload": records[0]["workload"],
         }
-        profiles.append(row)
+        key = (row["gpu"], row["workload"])
+        insert_unique(profiles, profile_sources, key, row, path, "template profile")
     spconv_by_key = {}
-    for path in sorted((root / "microbenchmark" / "profile_spconv").glob("*.jsonl")):
+    spconv_sources = {}
+    for path in sorted((root / "microbenchmark" / "profile_spconv").rglob("*.jsonl")):
         records = read_jsonl(path)
         if records:
-            spconv_by_key[(records[0]["gpu"], records[0]["workload"])] = records
-    return profiles, raw_by_key, spconv_by_key
+            key = (records[0]["gpu"], records[0]["workload"])
+            insert_unique(spconv_by_key, spconv_sources, key, records, path, "SpConv profile")
+    return [profiles[key] for key in sorted(profiles)], raw_by_key, spconv_by_key
 
 
 def timing_rows(root: Path):
@@ -112,8 +125,9 @@ def timing_rows(root: Path):
     statistics.
     """
     timings = {}
+    timing_sources = {}
     timing_root = root / "microbenchmark" / "timing"
-    for summary_path in sorted(timing_root.glob("logs_*/*.summary.json")):
+    for summary_path in sorted(timing_root.rglob("*.summary.json")):
         summary = json.loads(summary_path.read_text(encoding="utf-8"))
         path = summary_path.with_name(summary_path.name.replace(".summary.json", ".jsonl"))
         if not path.exists():
@@ -122,11 +136,12 @@ def timing_rows(root: Path):
         if not records:
             continue
         key = (summary["gpu"], summary["workload"], summary["backend"], summary["dtype"])
-        timings[key] = {
+        values = {
             tuple(record["frame_ids"]): float(record["conv_only_ms"])
             for record in records
             if "conv_only_ms" in record and record.get("frame_ids")
         }
+        insert_unique(timings, timing_sources, key, values, path, "microbenchmark timing")
     return timings
 
 
@@ -213,12 +228,14 @@ def throughput_rows(summary, raw_profiles, spconv_profiles, frame_timings=None):
                 "workload": timing["workload"],
             }
         )
+    rows.sort(key=lambda row: (row["gpu"], row["workload"], row["backend"], row["dtype"]))
     return rows
 
 
 def breakdown_rows(root: Path, summaries):
     rows = []
-    for path in sorted((root / "microbenchmark" / "time_breakdown").glob("*.jsonl")):
+    seen = {}
+    for path in sorted((root / "microbenchmark" / "time_breakdown").rglob("*.jsonl")):
         records = read_jsonl(path)
         if not records:
             continue
@@ -226,6 +243,10 @@ def breakdown_rows(root: Path, summaries):
         dtype = records[0]["dtype"]
         gpu = records[0]["gpu"]
         workload = records[0]["workload"]
+        key = (gpu, workload, backend, dtype)
+        if key in seen:
+            raise ValueError(f"duplicate time breakdown for {key}: {seen[key]} and {path}")
+        seen[key] = path
         metric = "end2end" if workload.startswith("minkunet") else "conv_only"
         targets = [
             row
@@ -277,14 +298,18 @@ def breakdown_rows(root: Path, summaries):
                 "workload": workload,
             }
         )
+    rows.sort(key=lambda row: (row["gpu"], row["workload"], row["backend"], row["dtype"]))
     return rows
 
 
 def memory_rows(root: Path):
-    rows = []
-    for path in sorted((root / "microbenchmark" / "peak_memory").glob("*.json")):
-        rows.append(json.loads(path.read_text()))
-    return rows
+    rows = {}
+    sources = {}
+    for path in sorted((root / "microbenchmark" / "peak_memory").rglob("*.json")):
+        row = json.loads(path.read_text())
+        key = (row["gpu"], row["workload"], row["backend"], row["dtype"])
+        insert_unique(rows, sources, key, row, path, "peak-memory record")
+    return [rows[key] for key in sorted(rows)]
 
 
 def parse_args():

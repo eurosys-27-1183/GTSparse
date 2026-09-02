@@ -81,7 +81,10 @@ if [[ "$run_end_to_end" == 0 && "$run_microbenchmark" == 0 && "$run_ablation" ==
   exit 2
 fi
 
-gpu_key="$(python -c 'import torch; s=torch.cuda.get_device_name(torch.device("'"$device"'")); print("".join(c if c.isalnum() or c in "-_." else "_" for c in s).strip("_"))')"
+gpu_key=""
+if [[ "$run_end_to_end" == 1 || "$run_microbenchmark" == 1 || "$run_ablation" == 1 || "$run_sensitivity" == 1 ]]; then
+  gpu_key="$(python -c 'import torch; s=torch.cuda.get_device_name(torch.device("'"$device"'")); print("".join(c if c.isalnum() or c in "-_." else "_" for c in s).strip("_"))')"
+fi
 
 run_experiment() {
   local marker="$1" expected_frames="$2"
@@ -122,8 +125,9 @@ if [[ "$run_microbenchmark" == 1 ]]; then
   done
 
   for workload in second_kitti_sweeps1 voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10 minkunet_semantickitti_sweeps1; do
-    run_experiment "logs/microbenchmark/profile/${workload}.jsonl" "$micro_frames" python -m experiments.profile_workload --workload "$workload" --frames "$micro_frames" \
-      --warmup "$warmup" --device "$device" --out "logs/microbenchmark/profile/${workload}.jsonl"
+    case_dir="logs/microbenchmark/profile/logs_${gpu_key}_float16_${workload}"
+    run_experiment "${case_dir}/gtsparse.jsonl" "$micro_frames" python -m experiments.profile_workload --workload "$workload" --frames "$micro_frames" \
+      --warmup "$warmup" --device "$device" --out "${case_dir}/gtsparse.jsonl"
   done
   for workload in second_kitti_sweeps1 voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10 minkunet_semantickitti_sweeps1; do
     profile_frames="$frames"
@@ -134,19 +138,24 @@ if [[ "$run_microbenchmark" == 1 ]]; then
         minkunet_semantickitti_sweeps1) profile_frames=4071 ;;
       esac
     fi
-    run_experiment "logs/microbenchmark/template_profile/${workload}.jsonl" "$profile_frames" python -m experiments.profile_templates --workload "$workload" --frames "$frames" \
-      --warmup "$warmup" --device "$device" --out "logs/microbenchmark/template_profile/${workload}.jsonl"
+    case_dir="logs/microbenchmark/template_profile/logs_${gpu_key}_float16_${workload}"
+    run_experiment "${case_dir}/gtsparse.jsonl" "$profile_frames" python -m experiments.profile_templates --workload "$workload" --frames "$frames" \
+      --warmup "$warmup" --device "$device" --out "${case_dir}/gtsparse.jsonl"
   done
-  run_experiment logs/microbenchmark/profile_spconv/voxelnext_nuscenes_sweeps1.jsonl "$micro_frames" python -m experiments.profile_spconv --workload voxelnext_nuscenes_sweeps1 --frames "$micro_frames" \
-    --warmup "$warmup" --device "$device" --out logs/microbenchmark/profile_spconv/voxelnext_nuscenes_sweeps1.jsonl
+  case_dir="logs/microbenchmark/profile_spconv/logs_${gpu_key}_float16_voxelnext_nuscenes_sweeps1"
+  run_experiment "${case_dir}/spconv.jsonl" "$micro_frames" python -m experiments.profile_spconv --workload voxelnext_nuscenes_sweeps1 --frames "$micro_frames" \
+    --warmup "$warmup" --device "$device" --out "${case_dir}/spconv.jsonl"
 
   for workload in voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10; do
     for backend in gtsparse spconv torchsparse minkowski; do
       run_dtype=fp16
       [[ "$backend" == "minkowski" ]] && run_dtype=fp32
-      run_experiment "logs/microbenchmark/time_breakdown/${workload}_${backend}.jsonl" "$micro_frames" python -m experiments.time_breakdown --workload "$workload" --backend "$backend" --dtype "$run_dtype" \
+      dtype_label=float16
+      [[ "$run_dtype" == "fp32" ]] && dtype_label=float32
+      case_dir="logs/microbenchmark/time_breakdown/logs_${gpu_key}_${dtype_label}_${workload}"
+      run_experiment "${case_dir}/${backend}.jsonl" "$micro_frames" python -m experiments.time_breakdown --workload "$workload" --backend "$backend" --dtype "$run_dtype" \
         --frames "$micro_frames" --warmup "$warmup" --device "$device" \
-        --out "logs/microbenchmark/time_breakdown/${workload}_${backend}.jsonl"
+        --out "${case_dir}/${backend}.jsonl"
     done
   done
 
@@ -154,9 +163,12 @@ if [[ "$run_microbenchmark" == 1 ]]; then
     for backend in gtsparse spconv torchsparse minkowski; do
       run_dtype=fp16
       [[ "$backend" == "minkowski" ]] && run_dtype=fp32
-      run_experiment "logs/microbenchmark/peak_memory/${workload}_${backend}.json" "$memory_frames" python -m experiments.peak_memory --workload "$workload" --backend "$backend" --dtype "$run_dtype" \
+      dtype_label=float16
+      [[ "$run_dtype" == "fp32" ]] && dtype_label=float32
+      case_dir="logs/microbenchmark/peak_memory/logs_${gpu_key}_${dtype_label}_${workload}"
+      run_experiment "${case_dir}/${backend}.json" "$memory_frames" python -m experiments.peak_memory --workload "$workload" --backend "$backend" --dtype "$run_dtype" \
         --frames "$memory_frames" --warmup "$warmup" --device "$device" \
-        --out "logs/microbenchmark/peak_memory/${workload}_${backend}.json"
+        --out "${case_dir}/${backend}.json"
     done
   done
 fi

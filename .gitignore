@@ -19,6 +19,8 @@ ActiMM/
 AGENTS.md
 .venv/
 .cuda/
+**.tar.gz
+**.tar.gz.sha256
 
 build/
 dist/
