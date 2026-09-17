@@ -160,6 +160,7 @@ setup(
     name="gtsparse",
     version="0.1.0",
     description="Geometric-Template-Driven Sparse Convolution Runtime on GPUs",
+    license="BSD-3-Clause",
     packages=find_packages(where="src"),
     package_dir={"": "src"},
     ext_modules=[

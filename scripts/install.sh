@@ -22,9 +22,17 @@ python -m pip install torch==2.1.2+cu121 torchvision==0.16.2+cu121 \
   --index-url https://download.pytorch.org/whl/cu121
 python -m pip install -r requirements.txt
 
-gtsparse_arch="$(python -c 'import torch; a=torch.cuda.get_device_capability(); print(f"{a[0]}.{a[1]}")')"
-export CUMM_CUDA_ARCH_LIST="$gtsparse_arch"
-export TORCH_CUDA_ARCH_LIST="$gtsparse_arch"
+if gtsparse_arch="$(python -c 'import torch; a=torch.cuda.get_device_capability(); print(f"{a[0]}.{a[1]}")' 2>/dev/null)"; then
+  export CUMM_CUDA_ARCH_LIST="$gtsparse_arch"
+  export TORCH_CUDA_ARCH_LIST="$gtsparse_arch"
+  export CUDA_ARCH="$gtsparse_arch"
+else
+  # No GPU at install time: target the platforms the paper evaluates on.
+  # Override these variables for other GPUs.
+  export CUMM_CUDA_ARCH_LIST="8.0;8.6;8.9"
+  export TORCH_CUDA_ARCH_LIST="8.0;8.6;8.9"
+  export CUDA_ARCH="8.0;8.6;8.9"
+fi
 export FORCE_CUDA=1
 export MAX_JOBS=4
 unset CUMM_CUDA_VERSION
@@ -61,4 +69,8 @@ python -c 'import torchsparse'
 python -c 'import MinkowskiEngine'
 
 BUILD_MODE=production python -m pip install --no-build-isolation -e .
-python scripts/validate_install.py
+if python -c 'import torch; exit(0 if torch.cuda.is_available() else 1)' 2>/dev/null; then
+  python scripts/validate_install.py
+else
+  echo "no GPU in build environment; skipping validate_install.py (run it inside the container with --gpus all)"
+fi

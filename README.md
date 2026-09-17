@@ -34,6 +34,8 @@ tar -xf dataset.tar
 
 The archive extracts directly to `dataset/`. Users are responsible for complying with the original licenses of KITTI, NuScenes, and SemanticKITTI.
 
+Note: the nuScenes loader resolves the version by probing `v1.0-trainval`, then `v1.0-mini`, then `v1.0-test` under the given root, so different versions (e.g., mini and test) must be placed under separate roots.
+
 ## Installation
 
 The artifact uses Python 3.10, PyTorch 2.1.2, and CUDA Toolkit 12.1. Clone the baseline submodules and install all the baselines:
@@ -52,6 +54,30 @@ Run the activation script before building or evaluating in a new shell:
 source scripts/activate.sh
 python scripts/validate_install.py
 ```
+
+`validate_install.py` runs one 3x3x3 SubM convolution layer through GTSparse, SpConv, TorchSparse++, and MinkowskiEngine against a dense PyTorch reference, with TF32 disabled. The comparison is tolerance-based rather than bitwise: engines that accumulate in FP32 (GTSparse, TorchSparse++, MinkowskiEngine) agree at FP32 1e-3 and FP16 2e-2 (atol/rtol); SpConv's FP16 kernels accumulate in FP16 and are checked at atol=1.0. Bitwise equality across engines is not expected, since each engine reduces the kernel offsets in a different order and the production build uses fast-math.
+
+### Container
+
+A thin Dockerfile is provided: the image contains only the CUDA toolkit and OS dependencies, and the environment is built inside a named volume on the first run when the GPU is present during installation, matching the bare-metal path (arch detection, validation). Build the image (fast, no GPU needed):
+
+```bash
+bash scripts/build_container.sh
+```
+
+The environment is installed on the first run (~40–60 minutes; the host needs `nvidia-container-toolkit` for `--gpus all`). The install already runs `validate_install.py` at the end. `--shm-size=1g` is required: the DataLoader workers share batches through `/dev/shm`, whose container default (64 MB) is too small for multi-sweep point clouds.
+
+```bash
+# 1. Install the environment (one time):
+docker run --rm --gpus all --shm-size=1g -v gtsparse-workspace:/workspace \
+  gtsparse-artifact bash scripts/install.sh
+# 2. Run experiments (reuses the installed environment):
+docker run --rm --gpus all --shm-size=1g -v gtsparse-workspace:/workspace \
+  -v /path/to/dataset:/workspace/GTSparse/dataset \
+  gtsparse-artifact bash run_artifact.sh --end-to-end fp16
+```
+
+Datasets are intentionally not baked into the image; mount them at runtime. The bare-metal installation above remains the primary installation path.
 
 ## Evaluation
 
@@ -95,7 +121,7 @@ bash run_artifact.sh --plots
 bash run_artifact.sh --all
 ```
 
-- `--end-to-end fp16|fp32|both` runs the main workload and backend matrix at the selected precision.
+- `--end-to-end fp16|fp32|both` runs the main workload and backend matrix at the selected precision. FP16 runs GTSparse, SpConv, and TorchSparse++ in FP16 and MinkowskiEngine in FP32; FP32 runs all four systems in FP32. SpConv uses its default sorted bitmask path, and TF32 is disabled in all runs.
 - `--microbenchmark` generates the template, throughput, breakdown, stability, and memory measurements.
 - `--ablation` runs the template-family ablation.
 - `--sensitivity` runs the sweep-sensitivity experiments.
@@ -103,6 +129,25 @@ bash run_artifact.sh --all
 - `--all` runs every experiment category and then generates all result tables and figures.
 
 Every GPU experiment displays a tqdm progress bar with the total, percentage, and ETA. Completed results are reused by default.
+
+### Resource Requirements
+
+Measured on the reference RTX 3080 with the locked clock settings described above; a faster GPU reduces the GPU time roughly proportionally. Wall time is 10–20% higher than GPU time due to data loading.
+
+| Experiment | Command | GPU time (RTX 3080) | Logs written |
+|---|---|---|---|
+| End-to-end FP16 | `--end-to-end fp16` | ~1.3 h | ~13 MB |
+| End-to-end FP32 | `--end-to-end fp32` | ~0.9 h | ~4 MB |
+| Microbenchmark | `--microbenchmark` | ~5 min | ~12 MB |
+| Ablation | `--ablation` | ~20 min | ~5 MB |
+| Sensitivity | `--sensitivity` | ~2.4 h | ~18 MB |
+| All categories | `--all` | ~5 h (~6 h wall) | ~52 MB |
+
+Installation takes about 40 minutes, plus several minutes for SpConv's first-import JIT compilation. The extracted datasets occupy about 200 GB (KITTI ~39 GB, nuScenes ~72 GB, SemanticKITTI ~90 GB); downloading and extracting `dataset.tar` requires roughly twice the extracted size (~400 GB of free space).
+
+### Measurement Methodology
+
+The microbenchmark experiment produces template-family distributions, effective-throughput data, builder/kernel breakdowns, and peak allocated GPU memory. Template-family percentages and average width aggregate output rows across all `3x3x3` (`K=27`) layers on the complete split; layers with other kernel volumes are excluded from this table. Useful work and issued work are reconstructed from a separate 100-frame per-layer profile; SpConv's issued work uses the M-tile width returned by its autotuned kernel for each layer. Breakdown uses the same fixed random sample of 100 frames for every backend. GTSparse uses native builder/kernel CUDA events, while baseline breakdown uses one cold-to-warm pair per independent frame. Aggregation takes the median per-frame component shares and scales them by the overall end-to-end latency, so the displayed builder and kernel values sum to the complete model latency (Table 3 in the paper). Peak memory reports `torch.cuda.max_memory_allocated` from model construction through the measured forwards, with each backend run in a separate process. Ablation evaluates `min_template=0,1,4,7` on VoxelNeXt with 10 sweeps. Sensitivity evaluates all systems with 1, 5, 10, and 20 sweeps.
 
 ### Outputs and Paper Reproduction
 
@@ -129,3 +174,26 @@ bash run_artifact.sh --sensitivity
 ```
 
 Raw measurements are written under `logs/`; microbenchmark cases are separated by GPU, dtype, and workload so measurements from multiple platforms can coexist. Aggregated paper data from all available platforms is written as CSV files under `results/`. The cross-platform end-to-end figure is written directly under `figures/`, while all platform-specific tables and figures are written under `figures/<gpu>/`. After the measurements are available, `bash run_artifact.sh --plots` regenerates both `results/` and `figures/` directly from the raw logs.
+
+## Citation
+
+If you use this artifact in research, please cite the paper (machine-readable metadata is also provided in `CITATION.cff`):
+
+```bibtex
+@inproceedings{gtsparse2027,
+  author    = {TBD},
+  title     = {GTSparse: A Geometric-Template-Driven Sparse Convolution Runtime for GPUs},
+  booktitle = {Proceedings of the 22nd European Conference on Computer Systems (EuroSys '27)},
+  pages     = {TBD},
+  publisher = {ACM},
+  address   = {New York, NY, USA},
+  year      = {2027},
+  doi       = {TBD},
+}
+```
+
+The author list, page numbers, and DOI are filled in upon publication.
+
+## License
+
+GTSparse is licensed under the BSD 3-Clause License (see `LICENSE`), which permits use, comparison, and extension with attribution. The baseline engines under `third_parties/` retain their own licenses: cumm and SpConv are Apache-2.0, TorchSparse++ is MIT, sparsehash is BSD-3-Clause, and MinkowskiEngine (the CUDA-13-compatible fork) is MIT. The datasets are distributed under their respective original licenses; users are responsible for complying with them.
