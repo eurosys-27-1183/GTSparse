@@ -87,3 +87,9 @@ vcpkg_installed/
 # test output & cache
 Testing/
 .cache/
+
+# Example outputs: keep the reference logs, drop regenerable aggregates.
+!examples/
+!examples/logs/
+examples/results/
+examples/figures/

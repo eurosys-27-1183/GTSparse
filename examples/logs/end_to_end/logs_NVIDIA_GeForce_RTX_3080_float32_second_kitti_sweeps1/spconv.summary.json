@@ -1,0 +1,31 @@
+{
+  "backend": "spconv",
+  "batch": 1,
+  "data_root": "dataset/kitti",
+  "dtype": "fp32",
+  "frames_logged": 5,
+  "gpu": "NVIDIA GeForce RTX 3080",
+  "spconv_do_sort": true,
+  "split": "test",
+  "stats": {
+    "conv_only": {
+      "count": 5,
+      "max_ms": 8.078751564025879,
+      "mean_ms": 7.737209606170654,
+      "median_ms": 7.670464038848877,
+      "min_ms": 7.347008228302002
+    },
+    "end2end": {
+      "count": 5,
+      "max_ms": 17.041759490966797,
+      "mean_ms": 16.613644790649413,
+      "median_ms": 16.510944366455078,
+      "min_ms": 16.142335891723633
+    }
+  },
+  "sweeps": 1,
+  "timing_repeats": 3,
+  "timing_warmup_repeats": 2,
+  "warmup_batches": 5,
+  "workload": "second_kitti_sweeps1"
+}

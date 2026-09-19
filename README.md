@@ -145,6 +145,18 @@ Measured on the reference RTX 3080 with the locked clock settings described abov
 
 Installation takes about 40 minutes, plus several minutes for SpConv's first-import JIT compilation. The extracted datasets occupy about 200 GB (KITTI ~39 GB, nuScenes ~72 GB, SemanticKITTI ~90 GB); downloading and extracting `dataset.tar` requires roughly twice the extracted size (~400 GB of free space).
 
+### Example Runs
+
+Each experiment category has an example run that completes in a few minutes on any GPU. The examples use the first N frames of the downloaded datasets and write everything under `examples/` (via `--output-root`), leaving `logs/` untouched. The reference outputs of exactly these commands, captured on the RTX 3080, are stored in `examples/logs/` for comparison; see `examples/README.md` for the commands, the expected files, and what to compare (structure, orderings, and magnitudes).
+
+```bash
+bash run_artifact.sh --end-to-end fp16 --frames 5 --output-root examples
+bash run_artifact.sh --end-to-end fp32 --frames 5 --output-root examples
+bash run_artifact.sh --microbenchmark --micro-frames 10 --memory-frames 5 --frames 50 --output-root examples
+bash run_artifact.sh --ablation --frames 50 --output-root examples
+bash run_artifact.sh --sensitivity --frames 50 --output-root examples
+```
+
 ### Measurement Methodology
 
 The microbenchmark experiment produces template-family distributions, effective-throughput data, builder/kernel breakdowns, and peak allocated GPU memory. Template-family percentages and average width aggregate output rows across all `3x3x3` (`K=27`) layers on the complete split; layers with other kernel volumes are excluded from this table. Useful work and issued work are reconstructed from a separate 100-frame per-layer profile; SpConv's issued work uses the M-tile width returned by its autotuned kernel for each layer. Breakdown uses the same fixed random sample of 100 frames for every backend. GTSparse uses native builder/kernel CUDA events, while baseline breakdown uses one cold-to-warm pair per independent frame. Aggregation takes the median per-frame component shares and scales them by the overall end-to-end latency, so the displayed builder and kernel values sum to the complete model latency (Table 3 in the paper). Peak memory reports `torch.cuda.max_memory_allocated` from model construction through the measured forwards, with each backend run in a separate process. Ablation evaluates `min_template=0,1,4,7` on VoxelNeXt with 10 sweeps. Sensitivity evaluates all systems with 1, 5, 10, and 20 sweeps.

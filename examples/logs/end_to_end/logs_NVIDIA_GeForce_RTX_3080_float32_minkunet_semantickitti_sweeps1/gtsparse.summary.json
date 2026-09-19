@@ -1,0 +1,24 @@
+{
+  "backend": "gtsparse",
+  "batch": 1,
+  "data_root": "dataset/semantickitti",
+  "dtype": "fp32",
+  "frames_logged": 5,
+  "gpu": "NVIDIA GeForce RTX 3080",
+  "spconv_do_sort": true,
+  "split": "val",
+  "stats": {
+    "end2end": {
+      "count": 5,
+      "max_ms": 42.86870574951172,
+      "mean_ms": 42.5804931640625,
+      "median_ms": 42.57279968261719,
+      "min_ms": 42.254337310791016
+    }
+  },
+  "sweeps": 1,
+  "timing_repeats": 3,
+  "timing_warmup_repeats": 2,
+  "warmup_batches": 5,
+  "workload": "minkunet_semantickitti_sweeps1"
+}
