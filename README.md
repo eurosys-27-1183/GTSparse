@@ -85,6 +85,8 @@ Datasets are intentionally not baked into the image; mount them at runtime. The 
 
 Absolute latency can vary slightly across machines even with the same GPU model. Different host platforms have different CPU microarchitectures, memory subsystems, PCIe generations and topologies, motherboard firmware, and cooling capabilities; CPU and GPU power or clock policies introduce further variation. To reduce run-to-run variation, we recommend using a stable performance state and keeping the settings unchanged across all backends. The relative performance trends should nevertheless remain consistent.
 
+The same reading applies to the paper's microbenchmark tables. The builder-share table (Table 3), the peak-memory table (Table 4), and the throughput figure (Fig 5) were measured on an RTX 4090 with the development pipeline, while the released logs carry the RTX 3080 for these categories. Builder shares shift with the platform: on a faster GPU the kernel portion shrinks and the builder's share grows. Peak memory depends on the measurement method and allocator behavior. Raw TFLOPS scale with the GPU. The corresponding claims are stated as shares, orderings, and deltas (30–186 MB), which reproduce across platforms.
+
 On Linux systems that expose CPU frequency and power controls, a performance governor together with a sustainable minimum frequency and package power limit can improve measurement stability. Some `thermald` configurations may restore the default power limit during a long run; when appropriate, it can be stopped temporarily while measurements are collected. The following shows the configuration used by our RTX 3080 test machine, which has an Intel i7-10700:
 
 ```bash
