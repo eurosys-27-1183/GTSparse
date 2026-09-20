@@ -145,38 +145,70 @@ def timing_rows(root: Path):
     return timings
 
 
-def spconv_issued_flops(profile_record, spconv_record) -> int:
-    issued = 0
-    if len(profile_record["layers"]) != len(spconv_record["layers"]):
-        raise ValueError("GTSparse and SpConv profiles contain different sparse-convolution layer counts")
-    for gtsparse_layer, spconv_layer in zip(profile_record["layers"], spconv_record["layers"]):
-        for field in ("cin", "cout", "n_out"):
-            if gtsparse_layer[field] != spconv_layer[field]:
-                raise ValueError(f"GTSparse and SpConv layer profiles differ at {field}")
-        issued += gtsparse_layer[f"spconv_issued_flops_bm{spconv_layer['tile_rows']}"]
-    return issued
+GTSPARSE_TEMPLATE_WIDTHS = {
+    # Actual number of payload slots per template (runtime.TEMPLATE_SLOT_COUNTS),
+    # i.e. what the kernel issues, not the padded family-buffer width.
+    "kernel27": (1, 10, 9, 10, 18, 19, 18, 27),
+    "kernel9": (1, 4, 3, 4, 6, 7, 7, 9),
+    "kernel8": (0, 1, 1, 1, 1, 1, 1, 1, 1, 4, 4, 4, 4, 4, 4, 8),
+    "kernel3": (1, 1, 1, 2, 2, 2, 3),
+}
+KERNEL_VOLUMES = {"kernel27": 27, "kernel9": 9, "kernel8": 8, "kernel3": 3}
+
+# SpConv M-tiles observed from its autotune on the RTX 4090: layers with a small
+# output count use M=32 and the rest use M=64.  "observed" uses this table so the
+# proportionality matches the paper's RTX 4090 measurement; "autotuned" instead
+# reads the M-tile SpConv autotuned on the machine that produced the logs.
+SPCONV_OBSERVED_M_TILE = 64
+SPCONV_OBSERVED_SMALL_M_TILE = 32
+SPCONV_OBSERVED_SMALL_N_OUT = 7000
+SPCONV_TILE_MODES = ("observed", "autotuned")
 
 
-def torchsparse_issued_flops(profile_record, spconv_record) -> int:
-    if len(profile_record["layers"]) != len(spconv_record["layers"]):
-        raise ValueError("GTSparse and SpConv profiles contain different sparse-convolution layer counts")
-    issued = 0
-    voxelnext_bev_conv = False
-    for gtsparse_layer, spconv_layer in zip(profile_record["layers"], spconv_record["layers"]):
-        if profile_record["workload"].startswith("voxelnext_") and gtsparse_layer["kind"] == "kernel9" and not voxelnext_bev_conv:
-            issued += gtsparse_layer[f"spconv_issued_flops_bm{spconv_layer['tile_rows']}"]
-            voxelnext_bev_conv = True
-        else:
-            issued += gtsparse_layer["torchsparse_issued_flops"]
-    return issued
+def sparse_kind(kind: str) -> str:
+    for prefix in ("kernel27", "kernel9", "kernel8", "kernel3"):
+        if kind.startswith(prefix):
+            return prefix
+    raise ValueError(f"unknown sparse layer kind: {kind}")
 
 
-def throughput_rows(summary, raw_profiles, spconv_profiles, frame_timings=None):
+def flops_per_pair(layer) -> int:
+    return 2 * int(layer["cin"]) * int(layer["cout"])
+
+
+def gtsparse_issued_flops(layer) -> int:
+    """Issued FLOPs over the assigned template rows, before launch tile padding."""
+    widths = GTSPARSE_TEMPLATE_WIDTHS[sparse_kind(layer["kind"])]
+    counts = layer["template_counts"]
+    if len(counts) != len(widths):
+        raise ValueError(f"template count/width mismatch for {layer['kind']}: {len(counts)} vs {len(widths)}")
+    issued_rows = sum(int(count) * width for count, width in zip(counts, widths))
+    return issued_rows * flops_per_pair(layer)
+
+
+def full27_issued_flops(layer) -> int:
+    """Issued FLOPs for a fused-offset engine that executes the full kernel."""
+    volume = KERNEL_VOLUMES[sparse_kind(layer["kind"])]
+    return int(layer["n_out"]) * volume * flops_per_pair(layer)
+
+
+def spconv_issued_flops(layer, mode, autotuned_tile=None) -> int:
+    """Issued FLOPs for SpConv's sorted skip at the selected M-tile."""
+    if mode == "autotuned":
+        if autotuned_tile is None:
+            raise ValueError("autotuned SpConv mode needs a tile from the SpConv profile")
+        tile = int(autotuned_tile)
+    else:
+        tile = (
+            SPCONV_OBSERVED_SMALL_M_TILE
+            if int(layer["n_out"]) < SPCONV_OBSERVED_SMALL_N_OUT
+            else SPCONV_OBSERVED_M_TILE
+        )
+    return int(layer[f"spconv_issued_flops_bm{tile}"])
+
+
+def throughput_rows(summary, raw_profiles, spconv_profiles, frame_timings=None, spconv_tile_mode="observed"):
     rows = []
-    issued_key = {
-        "gtsparse": "gtsparse_issued_flops",
-        "minkowski": "minkowski_issued_flops",
-    }
     for timing in summary:
         if timing["experiment"] != "microbenchmark" or timing["metric"] != "conv_only":
             continue
@@ -185,6 +217,12 @@ def throughput_rows(summary, raw_profiles, spconv_profiles, frame_timings=None):
         if not records:
             continue
         backend = timing["backend"]
+        spconv_by_frame = None
+        if spconv_tile_mode == "autotuned":
+            spconv_records = spconv_profiles.get(key)
+            if not spconv_records:
+                raise ValueError(f"autotuned SpConv mode needs a SpConv profile for {key}")
+            spconv_by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
         timing_by_frame = None
         if frame_timings is not None:
             timing_by_frame = frame_timings.get((timing["gpu"], timing["workload"], backend, timing["dtype"]))
@@ -202,21 +240,36 @@ def throughput_rows(summary, raw_profiles, spconv_profiles, frame_timings=None):
             # Backward-compatible path for callers that only have summaries.
             elapsed_ms = float(timing["median_ms"]) * len(records)
             effective = statistics.mean(record["effective_flops"] for record in records) * len(records)
-        if backend == "spconv":
-            spconv_records = spconv_profiles.get(key)
-            if not spconv_records:
-                continue
-            by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
-            issued_values = [spconv_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records]
+        if backend == "gtsparse":
+            issued = sum(gtsparse_issued_flops(layer) for record in records for layer in record["layers"])
+        elif backend == "spconv":
+            issued = 0
+            for record in records:
+                spconv_record = spconv_by_frame.get(tuple(record["frame_ids"])) if spconv_by_frame else None
+                for index, layer in enumerate(record["layers"]):
+                    tile = spconv_record["layers"][index]["tile_rows"] if spconv_record else None
+                    issued += spconv_issued_flops(layer, spconv_tile_mode, tile)
         elif backend == "torchsparse":
-            spconv_records = spconv_profiles.get(key)
-            if not spconv_records:
-                continue
-            by_frame = {tuple(record["frame_ids"]): record for record in spconv_records}
-            issued_values = [torchsparse_issued_flops(record, by_frame[tuple(record["frame_ids"])]) for record in records]
+            issued = 0
+            for record in records:
+                spconv_record = spconv_by_frame.get(tuple(record["frame_ids"])) if spconv_by_frame else None
+                bev_seen = False
+                for index, layer in enumerate(record["layers"]):
+                    if (
+                        record["workload"].startswith("voxelnext_")
+                        and sparse_kind(layer["kind"]) == "kernel9"
+                        and not bev_seen
+                    ):
+                        # VoxelNeXt's BEV tail is a SpConv convolution.
+                        tile = spconv_record["layers"][index]["tile_rows"] if spconv_record else None
+                        issued += spconv_issued_flops(layer, spconv_tile_mode, tile)
+                        bev_seen = True
+                    else:
+                        issued += full27_issued_flops(layer)
+        elif backend == "minkowski":
+            issued = sum(record["minkowski_issued_flops"] for record in records)
         else:
-            issued_values = [record[issued_key[backend]] for record in records]
-        issued = sum(issued_values)
+            continue
         rows.append(
             {
                 "backend": backend,
@@ -259,6 +312,7 @@ def breakdown_rows(root: Path, summaries):
             and row["metric"] == metric
         ]
         scale_experiment = "end_to_end"
+        scale_metric = metric
         if not targets:
             targets = [
                 row
@@ -271,14 +325,19 @@ def breakdown_rows(root: Path, summaries):
                 and row["metric"] == metric
             ]
             scale_experiment = "microbenchmark"
-        if not targets:
-            raise ValueError(f"missing latency scale target for {gpu} {workload} {backend} {dtype}")
+        if targets:
+            target_ms = float(targets[-1]["median_ms"])
+        else:
+            # Standalone microbenchmark: no end-to-end or timing summary to scale
+            # to, so fall back to the measured breakdown total.
+            target_ms = statistics.median(record["total_ms"] for record in records)
+            scale_experiment = "raw"
+            scale_metric = "total"
         raw_builder = statistics.median(record["builder_ms"] for record in records)
         raw_kernel = statistics.median(record["kernel_ms"] for record in records)
         builder_share = statistics.median(
             record["builder_ms"] / record["total_ms"] for record in records
         )
-        target_ms = float(targets[-1]["median_ms"])
         rows.append(
             {
                 "backend": backend,
@@ -293,7 +352,7 @@ def breakdown_rows(root: Path, summaries):
                 "raw_builder_median_ms": raw_builder,
                 "raw_kernel_median_ms": raw_kernel,
                 "scale_experiment": scale_experiment,
-                "scale_metric": metric,
+                "scale_metric": scale_metric,
                 "total_median_ms": target_ms,
                 "workload": workload,
             }
@@ -316,6 +375,13 @@ def parse_args():
     parser = argparse.ArgumentParser()
     parser.add_argument("--logs", type=Path, default=Path("logs"))
     parser.add_argument("--results", type=Path, default=Path("results"))
+    parser.add_argument(
+        "--spconv-tile",
+        choices=SPCONV_TILE_MODES,
+        default="observed",
+        help="SpConv M-tile: 'observed' uses the RTX 4090 autotune table, "
+        "'autotuned' reads the tile autotuned on this machine",
+    )
     return parser.parse_args()
 
 
@@ -324,7 +390,7 @@ def main() -> None:
     summaries, per_frame = summary_rows(args.logs)
     profiles, raw_profiles, spconv_profiles = profile_rows(args.logs)
     frame_timings = timing_rows(args.logs)
-    throughput = throughput_rows(summaries, raw_profiles, spconv_profiles, frame_timings)
+    throughput = throughput_rows(summaries, raw_profiles, spconv_profiles, frame_timings, args.spconv_tile)
     breakdown = breakdown_rows(args.logs, summaries)
     memory = memory_rows(args.logs)
 

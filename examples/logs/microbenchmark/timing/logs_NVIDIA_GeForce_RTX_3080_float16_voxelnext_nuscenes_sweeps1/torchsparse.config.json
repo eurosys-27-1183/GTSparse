@@ -11,7 +11,7 @@
   "min_template": 0,
   "nms_thresh": 0.01,
   "post_maxsize": 100,
-  "random_sample": true,
+  "random_sample": false,
   "score_thresh": 0.1,
   "sorted": false,
   "spconv_do_sort": true,

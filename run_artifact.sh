@@ -20,6 +20,7 @@ timing_warmup=2
 device=cuda:0
 output_root=.
 overwrite=0
+spconv_tile=observed
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -73,8 +74,12 @@ while [[ $# -gt 0 ]]; do
       shift
       ;;
     --overwrite) overwrite=1 ;;
+    --spconv-tile)
+      spconv_tile="$2"
+      shift
+      ;;
     *)
-      echo "usage: bash run_artifact.sh [--end-to-end [fp16|fp32|both]] [--microbenchmark] [--ablation] [--sensitivity] [--plots] [--all] [--frames N] [--micro-frames N] [--memory-frames N] [--warmup N] [--timing-repeats N] [--device DEVICE] [--output-root DIR] [--overwrite]"
+      echo "usage: bash run_artifact.sh [--end-to-end [fp16|fp32|both]] [--microbenchmark] [--ablation] [--sensitivity] [--plots] [--all] [--frames N] [--micro-frames N] [--memory-frames N] [--warmup N] [--timing-repeats N] [--device DEVICE] [--output-root DIR] [--spconv-tile observed|autotuned] [--overwrite]"
       exit 2
       ;;
   esac
@@ -82,7 +87,7 @@ while [[ $# -gt 0 ]]; do
 done
 
 if [[ "$run_end_to_end" == 0 && "$run_microbenchmark" == 0 && "$run_ablation" == 0 && "$run_sensitivity" == 0 && "$process_results" == 0 ]]; then
-  echo "usage: bash run_artifact.sh [--end-to-end [fp16|fp32|both]] [--microbenchmark] [--ablation] [--sensitivity] [--plots] [--all]"
+  echo "usage: bash run_artifact.sh [--end-to-end [fp16|fp32|both]] [--microbenchmark] [--ablation] [--sensitivity] [--plots] [--all] [--spconv-tile observed|autotuned]"
   exit 2
 fi
 
@@ -124,7 +129,6 @@ if [[ "$run_microbenchmark" == 1 ]]; then
     marker="$output_root/logs/microbenchmark/timing/logs_${gpu_key}_${dtype_label}_voxelnext_nuscenes_sweeps1/${backend}.summary.json"
     run_experiment "$marker" "$micro_frames" python -m gtsparse.e2e_v2.nuscenes_voxelnext --backend "$backend" --dtype "$run_dtype" \
       --data-root dataset/nuscenes --split test --sweeps 1 --frames "$micro_frames" \
-      --random-sample \
       --warmup "$warmup" --timing-repeats "$timing_repeats" --timing-warmup-repeats "$timing_warmup" \
       --device "$device" --log-dir "$output_root/logs/microbenchmark/timing"
   done
@@ -132,7 +136,7 @@ if [[ "$run_microbenchmark" == 1 ]]; then
   for workload in second_kitti_sweeps1 voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10 minkunet_semantickitti_sweeps1; do
     case_dir="$output_root/logs/microbenchmark/profile/logs_${gpu_key}_float16_${workload}"
     run_experiment "${case_dir}/gtsparse.jsonl" "$micro_frames" python -m experiments.profile_workload --workload "$workload" --frames "$micro_frames" \
-      --warmup "$warmup" --device "$device" --out "${case_dir}/gtsparse.jsonl"
+      --first-frames --warmup "$warmup" --device "$device" --out "${case_dir}/gtsparse.jsonl"
   done
   for workload in second_kitti_sweeps1 voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10 minkunet_semantickitti_sweeps1; do
     profile_frames="$frames"
@@ -149,7 +153,7 @@ if [[ "$run_microbenchmark" == 1 ]]; then
   done
   case_dir="$output_root/logs/microbenchmark/profile_spconv/logs_${gpu_key}_float16_voxelnext_nuscenes_sweeps1"
   run_experiment "${case_dir}/spconv.jsonl" "$micro_frames" python -m experiments.profile_spconv --workload voxelnext_nuscenes_sweeps1 --frames "$micro_frames" \
-    --warmup "$warmup" --device "$device" --out "${case_dir}/spconv.jsonl"
+    --first-frames --warmup "$warmup" --device "$device" --out "${case_dir}/spconv.jsonl"
 
   for workload in voxelnext_nuscenes_sweeps1 voxelnext_nuscenes_sweeps10; do
     for backend in gtsparse spconv torchsparse minkowski; do
@@ -205,5 +209,5 @@ if [[ "$run_sensitivity" == 1 ]]; then
   done
 fi
 
-python -m experiments.aggregate --logs "$output_root/logs" --results "$output_root/results"
+python -m experiments.aggregate --logs "$output_root/logs" --results "$output_root/results" --spconv-tile "$spconv_tile"
 python -m experiments.plot_results --results "$output_root/results" --figures "$output_root/figures"

@@ -37,6 +37,7 @@ def parse_args():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--first-frames", action="store_true", help="profile the first N frames instead of a random sample")
     return parser.parse_args()
 
 
@@ -50,7 +51,7 @@ def main() -> None:
         "fp16",
         args.frames,
         args.device,
-        random_sample=True,
+        random_sample=not args.first_frames,
     )
 
     with torch.no_grad():

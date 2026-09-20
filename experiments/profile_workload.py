@@ -7,7 +7,7 @@ import torch
 from tqdm.auto import tqdm
 
 from experiments.workloads import WORKLOADS, build_workload, move_batch, sparse_forward
-from gtsparse.sparse3d.geometric_template.runtime import PAYLOAD_LOGICAL_TO_ACTUAL, TEMPLATE_KEEP_SLOTS
+from gtsparse.sparse3d.geometric_template.runtime import PAYLOAD_LOGICAL_TO_ACTUAL, TEMPLATE_KEEP_SLOTS, TEMPLATE_SLOT_COUNTS
 import gtsparse.sparse3d.geometric_template.ops as gt_ops
 from gtsparse.sparse3d.geometric_template import (
     GeometricTemplateKernel3Conv3d,
@@ -80,7 +80,7 @@ def observe_runtime(kind, features, logical_weight, runtime) -> None:
     padded_counts = [int(value) for value in runtime.padded_counts.tolist()]
     masks = _runtime_masks(runtime, counts)
     active_pairs = int(sum(int(value).bit_count() for value in masks))
-    widths = (1, 10, 10, 10, 19, 19, 19, 27)
+    widths = tuple(int(value) for value in TEMPLATE_SLOT_COUNTS)
     gtsparse_offset_rows = sum(count * width for count, width in zip(padded_counts, widths))
     full_offset_rows = _padded_rows(int(runtime.n_out), TORCHSPARSE_BM) * 27
     spconv_offset_rows = {tile_rows: _spconv_offset_rows(masks, tile_rows) for tile_rows in (32, 64, 128)}
@@ -218,6 +218,7 @@ def parse_args():
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--device", default="cuda:0")
     parser.add_argument("--out", type=Path, required=True)
+    parser.add_argument("--first-frames", action="store_true", help="profile the first N frames instead of a random sample")
     return parser.parse_args()
 
 
@@ -231,7 +232,7 @@ def main() -> None:
         "fp16",
         args.frames,
         args.device,
-        random_sample=True,
+        random_sample=not args.first_frames,
     )
     handles = [
         module.register_forward_hook(special_hook)
