@@ -6,6 +6,8 @@ This artifact reproduces the experiments in the paper. It builds GTSparse and th
 
 Tested environment: Ubuntu 22.04, NVIDIA driver 560+, CUDA Toolkit 12.1, Python 3.10, PyTorch 2.1.2. The reference machine has an Intel i7-10700 (32 GB RAM) with an NVIDIA GeForce RTX 3080 (10 GB). Any Linux machine with a supported NVIDIA GPU (sm 70+, 8+ GB VRAM) and at least 400 GB of free disk space should work.
 
+Permanent archive: [10.5281/zenodo.22879641](https://doi.org/10.5281/zenodo.22879641)
+
 MinkowskiEngine may print an `OMP_NUM_THREADS` warning on first import; this is harmless and can be ignored.
 
 ## Dataset Preparation
